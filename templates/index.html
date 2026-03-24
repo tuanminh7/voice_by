@@ -61,10 +61,14 @@
     </main>
 
     <footer class="control-dock">
-      <button id="voiceBtn" type="button" class="mic-button" aria-label="Nói với trợ lý">
-        <span class="mic-icon" aria-hidden="true"></span>
-      </button>
+      <div class="dock-actions">
+        <button id="voiceBtn" type="button" class="mic-button" aria-label="Nói với trợ lý">
+          <span class="mic-icon" aria-hidden="true"></span>
+        </button>
+        <button id="installAppBtn" type="button" class="install-btn">Cài app</button>
+      </div>
       <p class="dock-text">Chạm vào nút micro để bắt đầu nói với trợ lý.</p>
+      <p id="installHint" class="install-hint" hidden></p>
     </footer>
   </div>
 

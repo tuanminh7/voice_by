@@ -4,6 +4,8 @@ const messageInput = document.getElementById("messageInput");
 const sendBtn = document.getElementById("sendBtn");
 const voiceBtn = document.getElementById("voiceBtn");
 const clearSpeechBtn = document.getElementById("clearSpeechBtn");
+const installAppBtn = document.getElementById("installAppBtn");
+const installHint = document.getElementById("installHint");
 const statusText = document.getElementById("statusText");
 const avatarFrame = document.getElementById("avatarFrame");
 
@@ -12,6 +14,8 @@ let isWaitingForReply = false;
 let availableVoices = [];
 let preferredVietnameseVoice = null;
 let missingVietnameseVoiceNotified = false;
+let activeRecognition = null;
+let deferredInstallPrompt = null;
 
 function normalizeVoiceLang(lang = "") {
   return lang.toLowerCase().replace(/_/g, "-");
@@ -124,6 +128,114 @@ if ("speechSynthesis" in window) {
     window.speechSynthesis.onvoiceschanged = refreshSpeechVoices;
   }
 }
+
+function setInstallHint(message = "") {
+  if (!installHint) {
+    return;
+  }
+
+  installHint.textContent = message;
+  installHint.hidden = !message;
+}
+
+function isStandaloneMode() {
+  return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+
+function isIosDevice() {
+  return /iPad|iPhone|iPod/.test(window.navigator.userAgent)
+    || (window.navigator.platform === "MacIntel" && window.navigator.maxTouchPoints > 1);
+}
+
+function isAndroidDevice() {
+  return /Android/i.test(window.navigator.userAgent);
+}
+
+function isInAppBrowser() {
+  return /Zalo|FBAN|FBAV|Instagram|Line|; wv\)|\bwv\b/i.test(window.navigator.userAgent);
+}
+
+function isSafariBrowser() {
+  const userAgent = window.navigator.userAgent;
+  return /Safari/i.test(userAgent) && !/CriOS|FxiOS|EdgiOS|OPiOS|Zalo|FBAN|FBAV|Instagram/i.test(userAgent);
+}
+
+function updateInstallButton() {
+  if (!installAppBtn) {
+    return;
+  }
+
+  if (isStandaloneMode()) {
+    installAppBtn.hidden = true;
+    setInstallHint("Ứng dụng đã được cài trên thiết bị này.");
+    return;
+  }
+
+  installAppBtn.hidden = false;
+  installAppBtn.disabled = false;
+  installAppBtn.textContent = "Cài app";
+
+  if (deferredInstallPrompt) {
+    setInstallHint("Thiết bị này hỗ trợ cài nhanh. Bạn bấm Cài app để thêm ra màn hình chính.");
+    return;
+  }
+
+  setInstallHint("");
+}
+
+async function handleInstallApp() {
+  if (isStandaloneMode()) {
+    setInstallHint("Ứng dụng đã được cài trên thiết bị này.");
+    return;
+  }
+
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    const choiceResult = await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    updateInstallButton();
+
+    if (choiceResult.outcome === "accepted") {
+      setInstallHint("Đang thêm ứng dụng vào màn hình chính của bạn.");
+    } else {
+      setInstallHint("Bạn có thể bấm lại Cài app bất cứ lúc nào khi muốn.");
+    }
+    return;
+  }
+
+  if (isInAppBrowser()) {
+    setInstallHint("Bạn đang mở trong trình duyệt tích hợp của ứng dụng khác. Hãy mở link này bằng Chrome hoặc Safari rồi bấm Cài app.");
+    return;
+  }
+
+  if (isIosDevice()) {
+    if (isSafariBrowser()) {
+      setInstallHint("Trên iPhone hoặc iPad, hãy bấm Chia sẻ rồi chọn Thêm vào Màn hình chính.");
+    } else {
+      setInstallHint("Trên iPhone hoặc iPad, hãy mở link này bằng Safari rồi chọn Chia sẻ và Thêm vào Màn hình chính.");
+    }
+    return;
+  }
+
+  if (isAndroidDevice()) {
+    setInstallHint("Nếu chưa thấy cửa sổ cài đặt, bạn mở menu trình duyệt rồi chọn Add to Home screen hoặc Install app.");
+    return;
+  }
+
+  setInstallHint("Trình duyệt này chưa hiện cửa sổ cài tự động. Bạn thử menu của trình duyệt để tìm mục Install app hoặc Add to Home Screen.");
+}
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  updateInstallButton();
+});
+
+window.addEventListener("appinstalled", () => {
+  deferredInstallPrompt = null;
+  updateInstallButton();
+  setInstallHint("Đã cài ứng dụng thành công. Bạn có thể mở từ màn hình chính.");
+});
 
 function setStatus(message) {
   statusText.textContent = message;
@@ -247,12 +359,24 @@ async function sendMessage(text) {
 
 function startVoice() {
   if (!SpeechRecognition) {
-    setStatus("Trình duyệt này chưa hỗ trợ nhận giọng nói.");
+    setStatus("Trình duyệt này chưa hỗ trợ nhận giọng nói. Trên điện thoại, bạn nên thử Chrome Android.");
     return;
   }
 
+  if (activeRecognition) {
+    activeRecognition.abort();
+    activeRecognition = null;
+  }
+
+  window.speechSynthesis.cancel();
+
   const recognition = new SpeechRecognition();
+  let transcript = "";
+  let submitted = false;
+
+  activeRecognition = recognition;
   recognition.lang = "vi-VN";
+  recognition.continuous = false;
   recognition.interimResults = false;
   recognition.maxAlternatives = 1;
 
@@ -260,19 +384,54 @@ function startVoice() {
   setAvatarState("listening");
 
   recognition.onresult = (event) => {
-    const transcript = event.results[0][0].transcript;
+    transcript = Array.from(event.results)
+      .map((result) => result[0]?.transcript || "")
+      .join(" ")
+      .trim();
+
+    if (!transcript || submitted) {
+      return;
+    }
+
     messageInput.value = transcript;
+    submitted = true;
     setStatus("Đã nhận giọng nói, đang gửi lên server...");
     setAvatarState("");
     sendMessage(transcript);
   };
 
-  recognition.onerror = () => {
-    setStatus("Không nghe rõ gì, bạn thử nói lại giúp tôi nhé.");
+  recognition.onnomatch = () => {
+    setStatus("Tôi chưa nhận ra câu nói rõ ràng. Bạn thử nói chậm và gần micro hơn nhé.");
+    setAvatarState("");
+  };
+
+  recognition.onerror = (event) => {
+    const errorMessages = {
+      "audio-capture": "Điện thoại chưa dùng được micro. Bạn kiểm tra quyền micro giúp tôi nhé.",
+      "network": "Trình duyệt không gửi được giọng nói lên dịch vụ nhận diện. Bạn kiểm tra mạng rồi thử lại nhé.",
+      "no-speech": "Tôi chưa nghe thấy tiếng nói rõ ràng. Bạn thử nói lại giúp tôi nhé.",
+      "not-allowed": "Trình duyệt đang chặn quyền micro. Bạn hãy bật quyền micro cho trang này.",
+      "service-not-allowed": "Thiết bị hoặc trình duyệt này không cho dùng nhận giọng nói từ web.",
+      "aborted": "Đã dừng nghe giọng nói."
+    };
+
+    setStatus(errorMessages[event.error] || "Không thể nhận giọng nói trên trình duyệt này. Bạn thử Chrome trên Android hoặc nhập tay.");
     setAvatarState("");
   };
 
   recognition.onend = () => {
+    if (activeRecognition === recognition) {
+      activeRecognition = null;
+    }
+
+    if (!submitted && transcript.trim()) {
+      submitted = true;
+      messageInput.value = transcript.trim();
+      setStatus("Đã nhận giọng nói, đang gửi lên server...");
+      sendMessage(transcript.trim());
+      return;
+    }
+
     setAvatarState("");
     if (!isWaitingForReply) {
       setStatus("Sẵn sàng trò chuyện.");
@@ -339,6 +498,11 @@ chatForm.addEventListener("submit", (event) => {
 });
 
 voiceBtn.addEventListener("click", startVoice);
+installAppBtn.addEventListener("click", () => {
+  handleInstallApp().catch(() => {
+    setInstallHint("Chưa thể mở hộp cài ứng dụng trên thiết bị này. Bạn thử lại hoặc mở bằng Chrome hay Safari.");
+  });
+});
 clearSpeechBtn.addEventListener("click", () => {
   window.speechSynthesis.cancel();
   setStatus("Đã dừng đọc văn bản.");
@@ -349,3 +513,5 @@ createMessage(
   "assistant",
   "Dạ, tôi đã sẵn sàng. Bạn có thể gõ tin nhắn hoặc bấm nút Nói để bắt đầu."
 );
+
+updateInstallButton();

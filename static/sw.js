@@ -1,4 +1,4 @@
-const CACHE_NAME = "tro-ly-cache-v1";
+const CACHE_NAME = "tro-ly-cache-v2";
 const APP_ASSETS = [
   "/",
   "/static/style.css",
@@ -33,20 +33,16 @@ self.addEventListener("fetch", (event) => {
   }
 
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) {
-        return cachedResponse;
-      }
-
-      return fetch(event.request)
-        .then((networkResponse) => {
-          const clonedResponse = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, clonedResponse);
-          });
-          return networkResponse;
-        })
-        .catch(() => caches.match("/"));
-    })
+    fetch(event.request)
+      .then((networkResponse) => {
+        const clonedResponse = networkResponse.clone();
+        caches.open(CACHE_NAME).then((cache) => {
+          cache.put(event.request, clonedResponse);
+        });
+        return networkResponse;
+      })
+      .catch(() =>
+        caches.match(event.request).then((cachedResponse) => cachedResponse || caches.match("/"))
+      )
   );
 });
