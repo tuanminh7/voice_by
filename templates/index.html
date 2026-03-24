@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trợ lý sức khỏe</title>
+  <meta name="theme-color" content="#0f4c81">
+  <meta name="description" content="Trợ lý sức khỏe với giao diện đơn giản, dễ nhìn cho người lớn tuổi.">
+  <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">+</span>
+        <div>
+          <p class="brand-label">Ứng dụng đồng hành</p>
+          <h1>Trợ lý sức khỏe</h1>
+        </div>
+      </div>
+      <p class="model-chip">Model: {{ model_name }}</p>
+    </header>
+
+    <main class="main-stage">
+      <section class="assistant-stage">
+        <div class="avatar-frame" id="avatarFrame" aria-live="polite">
+          <div class="avatar-ring"></div>
+          <div class="avatar-ring avatar-ring-secondary"></div>
+          <img
+            class="avatar-image"
+            src="{{ url_for('static', filename='images/anh1.png') }}"
+            alt="Ảnh đại diện AI"
+          >
+        </div>
+        <p class="assistant-caption">Trợ lý đang ở đây để lắng nghe và trả lời thật rõ ràng.</p>
+        <p id="statusText" class="status-pill">Sẵn sàng trò chuyện.</p>
+      </section>
+
+      <section class="conversation-panel" aria-label="Khung hội thoại">
+        <div class="conversation-head">
+          <h2>Khung hội thoại</h2>
+          <button id="clearSpeechBtn" class="quiet-btn" type="button">Dừng đọc</button>
+        </div>
+
+        <div id="chatLog" class="chat-log" aria-live="polite"></div>
+
+        <form id="chatForm" class="composer">
+          <label class="sr-only" for="messageInput">Nhập câu hỏi</label>
+          <textarea
+            id="messageInput"
+            rows="2"
+            placeholder="Ví dụ: Hôm nay tôi nên ăn gì để dễ tiêu?"
+            required
+          ></textarea>
+          <div class="composer-actions">
+            <button id="sendBtn" type="submit" class="send-btn">Gửi</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <footer class="control-dock">
+      <button id="voiceBtn" type="button" class="mic-button" aria-label="Nói với trợ lý">
+        <span class="mic-icon" aria-hidden="true"></span>
+      </button>
+      <p class="dock-text">Chạm vào nút micro để bắt đầu nói với trợ lý.</p>
+    </footer>
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("{{ url_for('static', filename='sw.js') }}");
+      });
+    }
+  </script>
+</body>
+</html>

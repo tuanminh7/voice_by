@@ -1,0 +1,21 @@
+{
+  "name": "Tro ly giong nguoi than",
+  "short_name": "TroLy",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6efe6",
+  "theme_color": "#22577a",
+  "description": "Chatbot voice danh cho nguoi lon tuoi, dung Flask va Gemini.",
+  "icons": [
+    {
+      "src": "/static/icon.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

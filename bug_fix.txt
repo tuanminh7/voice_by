@@ -1,0 +1,20 @@
+1. Loi: Mo file `cautruc.txt` va `logic.txt` tren PowerShell bi loi hien thi tieng Viet thanh ky tu vo nghia.
+   Cach xu ly: Khong dua vao output console de danh gia sai noi dung file. Xac nhan lai theo ngu canh, uu tien doc file voi UTF-8 va giu noi dung source goc o dang Unicode khi ghi file moi.
+
+2. Loi: File `deploy_app.txt` duoc mo tren IDE nhung khong ton tai trong workspace thuc te.
+   Cach xu ly: Kiem tra lai bang `Get-ChildItem` truoc khi phu thuoc vao file. Neu file thieu, tiep tuc trien khai theo hai file yeu cau chinh va tu tao cau hinh deploy toi thieu (`render.yaml`) neu can.
+
+3. Loi: Workspace ban dau khong co source code, chi co file mo ta.
+   Cach xu ly: Dung project tu dau theo cau truc trong `cautruc.txt`, tranh cho user mot bo source chua dong bo. Tao du duong dan `templates/` va `static/` truoc khi ghi file.
+
+4. Loi: Neu chua cai `google-generativeai` hoac chua co `GEMINI_API_KEY`, backend se khong goi duoc Gemini.
+   Cach xu ly: Xu ly fail-safe trong `app.py`, tra ve thong bao than thien de user biet cach bo sung dependencies va bien moi truong thay vi de app vo trang hoac crash.
+
+5. Loi: Streaming response co the tra ve chunk rong hoac phat sinh exception giua luc doc stream.
+   Cach xu ly: Bo qua chunk rong, gom text hop le vao `full_text`, va bat `Exception` de tra ve thong diep loi mem thay vi cat ket noi dot ngot.
+
+6. Loi: Giao dien va mot so thong diep backend dung chuoi khong dau nen trai voi yeu cau hien thi tieng Viet day du.
+   Cach xu ly: Luu source bang UTF-8, doi chuoi UI va prompt sang tieng Viet co dau, giu `charset=utf-8` cho stream va bat `app.json.ensure_ascii = False` trong Flask.
+
+7. Loi: Giao dien ban dau moi toi uu cho mot kich thuoc man hinh, de co nguy co tran header, avatar qua lon hoac nut cham chua toi uu tren iPad va dien thoai.
+   Cach xu ly: Them breakpoint cho tablet va mobile, dung `100dvh`, ho tro `safe-area`, gioi han kich thuoc avatar, max-height cho khung chat va dam bao nut bam dat nguong de cham tren thiet bi cam ung.
