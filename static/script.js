@@ -69,6 +69,8 @@ let activeRecognition = null;
 let availableVoices = [];
 let preferredVietnameseVoice = null;
 let missingVietnameseVoiceNotified = false;
+let protectedStateRefreshTimer = null;
+let isRefreshingProtectedState = false;
 
 function getDeviceId() {
   let deviceId = window.localStorage.getItem(DEVICE_ID_KEY);
@@ -317,6 +319,11 @@ function ensureInitialMessage() {
 }
 
 async function loadProtectedState() {
+  if (isRefreshingProtectedState) {
+    return;
+  }
+
+  isRefreshingProtectedState = true;
   try {
     const data = await requestJson("/api/me", { method: "GET" }, "pin");
     state.me = data;
@@ -331,11 +338,34 @@ async function loadProtectedState() {
       return;
     }
     showBanner(normalizeErrorMessage(error, "Không tải được dữ liệu tài khoản."), "error");
+  } finally {
+    isRefreshingProtectedState = false;
   }
+}
+
+function startProtectedStatePolling() {
+  stopProtectedStatePolling();
+  protectedStateRefreshTimer = window.setInterval(() => {
+    if (document.visibilityState !== "visible" || views.app.classList.contains("hidden")) {
+      return;
+    }
+
+    loadProtectedState().catch(() => {});
+  }, 5000);
+}
+
+function stopProtectedStatePolling() {
+  if (!protectedStateRefreshTimer) {
+    return;
+  }
+
+  window.clearInterval(protectedStateRefreshTimer);
+  protectedStateRefreshTimer = null;
 }
 
 async function bootstrapSession() {
   showBanner("");
+  stopProtectedStatePolling();
 
   try {
     const bootstrap = await requestJson("/api/bootstrap", { method: "GET" }, "none");
@@ -361,6 +391,7 @@ async function bootstrapSession() {
     showView("app");
     setSection(state.activeSection);
     await loadProtectedState();
+    startProtectedStatePolling();
   } catch (error) {
     showView("auth");
     setAuthTab("login");
@@ -384,6 +415,55 @@ function createMessage(role, text) {
   chatLog.appendChild(wrapper);
   chatLog.scrollTop = chatLog.scrollHeight;
   return body;
+}
+
+function simplifyClientText(value) {
+  return (value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function looksLikeCallIntent(text) {
+  const simplified = simplifyClientText(text);
+  if (!simplified) {
+    return false;
+  }
+
+  const callKeywords = ["goi", "lien lac", "call"];
+  const roleAliases = [
+    "con trai",
+    "con gai",
+    "chau",
+    "vo",
+    "chong",
+    "anh trai",
+    "em trai",
+    "chi gai",
+    "em gai",
+    "nguoi nha",
+    "nguoi than",
+    "gia dinh",
+    "chu",
+    "bac",
+    "co",
+    "di",
+    "cau",
+    "mo",
+    "thim"
+  ];
+
+  return callKeywords.some((keyword) => simplified.includes(keyword))
+    && roleAliases.some((alias) => simplified.includes(alias));
+}
+
+async function tryCreateVoiceCall(transcriptText) {
+  return requestJson("/api/calls/voice-intent", {
+    method: "POST",
+    body: JSON.stringify({ transcript_text: transcriptText })
+  });
 }
 
 function normalizeVoiceLang(lang = "") {
@@ -535,6 +615,43 @@ async function sendMessage(text) {
   setAvatarState("");
 
   try {
+    if (looksLikeCallIntent(content)) {
+      setStatus("Đang xử lý lệnh gọi...");
+
+      try {
+        const callData = await tryCreateVoiceCall(content);
+        if (callData?.action === "calling") {
+          assistantBody.textContent = callData.message || "Đang thực hiện cuộc gọi cho bác.";
+          setStatus("Đã tạo cuộc gọi.");
+          await loadProtectedState();
+          if (assistantBody.textContent.trim()) {
+            window.setTimeout(() => speak(assistantBody.textContent), 300);
+          }
+          return;
+        }
+
+        if (callData?.action === "confirm") {
+          assistantBody.textContent = callData.question || "Bác muốn gọi ai ạ?";
+          setStatus("Bạn hãy xác nhận người cần gọi.");
+          if (assistantBody.textContent.trim()) {
+            window.setTimeout(() => speak(assistantBody.textContent), 300);
+          }
+          return;
+        }
+      } catch (error) {
+        if (error?.code && error.code !== "call_target_not_found") {
+          throw error;
+        }
+
+        assistantBody.textContent = normalizeErrorMessage(error, "Tôi chưa tạo được cuộc gọi này.");
+        setStatus("Lệnh gọi chưa thực hiện được.");
+        if (assistantBody.textContent.trim()) {
+          window.setTimeout(() => speak(assistantBody.textContent), 300);
+        }
+        return;
+      }
+    }
+
     const response = await fetch("/chat_stream", {
       method: "POST",
       headers: {
@@ -798,6 +915,7 @@ async function submitPinSetup(event) {
     setSection(state.activeSection);
     showBanner(data.message);
     await loadProtectedState();
+    startProtectedStatePolling();
   } catch (error) {
     showBanner(normalizeErrorMessage(error, "Thiết lập PIN chưa thành công."), "error");
   }
@@ -818,6 +936,7 @@ async function submitPinUnlock(event) {
     setSection(state.activeSection);
     showBanner(data.message);
     await loadProtectedState();
+    startProtectedStatePolling();
   } catch (error) {
     showBanner(normalizeErrorMessage(error, "PIN chưa đúng."), "error");
   }
@@ -987,6 +1106,7 @@ async function logout() {
 
   try {
     const data = await requestJson("/api/auth/logout", { method: "POST" }, "none");
+    stopProtectedStatePolling();
     setPinToken("");
     state.me = null;
     state.family = null;
@@ -1047,6 +1167,18 @@ installAppBtn.addEventListener("click", () => {
   handleInstallApp().catch(() => {
     showBanner("Chưa thể mở hộp cài ứng dụng trên thiết bị này.", "error");
   });
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !views.app.classList.contains("hidden")) {
+    loadProtectedState().catch(() => {});
+  }
+});
+
+window.addEventListener("focus", () => {
+  if (!views.app.classList.contains("hidden")) {
+    loadProtectedState().catch(() => {});
+  }
 });
 
 updateInstallButton();
