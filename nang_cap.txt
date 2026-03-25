@@ -1,0 +1,169 @@
+
+chức năng 1 đăng nhập đăng kí 
+1 tài khoản cá nhân-> sử dụng tài khoản cá nhân có thể kết bạn với các tài khoản khác và add thành gia đình
+2 là tài khoản gia đình -> khi chọn tài khoản này sẽ đồng thời có 1 tk admin trong gia đình đó tài khoản đó quản lí 
+các tài khoản khác trong gia đình nếu muốn add thêm tài khoản cá nhân vào nhóm gia đình cũng được
+phương án cần có để đăng kí là gmail + sdt cái này bắt buộc còn lại là tên tuổi nhớ làm luôn mục khôi phục tài khoản
+nếu quên mật khẩu
+
+chức năng 2 
+Flutter + Flask + AI + gọi khẩn cấp
+mô tả: khi người già có việc gấp họ nói với AI nhờ AI gọi cho 1 trong các thành viên trong 
+gia đình thì AI sẽ làm việc đó
+1. Tổng quan chức năng bạn sẽ thêm
+User (người già) nói
+→ Flutter nhận giọng nói
+→ gửi lên Flask
+→ AI (Gemini) hiểu ý định "gọi"
+→ Flask tạo cuộc gọi + gửi thông báo
+→ Người thân nhận thông báo + nhạc
+→ Bấm vào → mở app → vào call
+→ WebRTC kết nối
+2. Bước 1: Chuẩn bị backend Flask
+2.1 Cài thư viện
+pip install flask flask-socketio eventlet google-generativeai
+2.2 Thêm API nhận text từ Flutter
+@app.route("/voice", methods=["POST"])
+def voice():
+    text = request.json["text"]
+
+    intent = detect_intent(text)
+
+    if intent["type"] == "call":
+        room_id = create_room()
+        send_push(intent["target"], room_id)
+
+        return {
+            "action": "calling",
+            "message": "Đang gọi người thân giúp bác",
+            "room": room_id
+        }
+
+    return {"action": "chat"}
+2.3 Detect intent gọi
+contacts = {
+    "con trai": "user_2",
+    "con gái": "user_3"
+}
+
+def detect_intent(text):
+    text = text.lower()
+
+    if "gọi" in text:
+        for name in contacts:
+            if name in text:
+                return {
+                    "type": "call",
+                    "target": contacts[name]
+                }
+
+    return {"type": "chat"}
+2.4 Tạo phòng call
+import uuid
+
+def create_room():
+    return str(uuid.uuid4())
+3. Bước 2: Setup Firebase Push
+3.1 Tạo project Firebase
+
+Dùng Firebase
+
+tạo project
+bật Cloud Messaging
+3.2 Lấy server key
+dùng để gửi push từ Flask
+3.3 Flask gửi notification
+import requests
+
+def send_push(user_id, room_id):
+    token = get_user_token(user_id)
+
+    requests.post(
+        "https://fcm.googleapis.com/fcm/send",
+        headers={
+            "Authorization": "key=YOUR_SERVER_KEY",
+            "Content-Type": "application/json"
+        },
+        json={
+            "to": token,
+            "notification": {
+                "title": "Mẹ đang gọi",
+                "body": "Nhấn để trả lời"
+            },
+            "data": {
+                "room": room_id
+            }
+        }
+    )
+4. Bước 3: Flutter – nhận giọng nói
+4.1 Cài package
+flutter pub add speech_to_text
+flutter pub add flutter_tts
+4.2 Nhận voice
+final speech = SpeechToText();
+
+await speech.initialize();
+
+speech.listen(onResult: (result) {
+  String text = result.recognizedWords;
+  sendToServer(text);
+});
+4.3 Gửi lên Flask
+Future sendToServer(String text) async {
+  final res = await http.post(
+    Uri.parse("https://your-api.onrender.com/voice"),
+    body: jsonEncode({"text": text}),
+    headers: {"Content-Type": "application/json"},
+  );
+
+  final data = jsonDecode(res.body);
+
+  if (data["action"] == "calling") {
+    // hiển thị "đang gọi"
+  }
+}
+5. Bước 4: Flutter nhận thông báo
+5.1 Cài Firebase
+flutter pub add firebase_messaging
+5.2 Nhận notification
+FirebaseMessaging.onMessage.listen((message) {
+  showIncomingCallUI(message.data["room"]);
+});
+5.3 Khi bấm notification
+FirebaseMessaging.onMessageOpenedApp.listen((message) {
+  String room = message.data["room"];
+  Navigator.pushNamed(context, "/call/$room");
+});
+6. Bước 5: Màn hình cuộc gọi
+6.1 UI
+MẸ ĐANG GỌI
+
+[ NGHE ]    [ TỪ CHỐI ]
+6.2 Khi bấm "Nghe"
+joinCall(roomId);
+7. Bước 6: WebRTC call
+7.1 Flutter
+
+Cài:
+
+flutter pub add flutter_webrtc
+7.2 Tạo kết nối
+dùng signaling qua Flask Socket.IO
+7.3 Kết nối 2 người
+Caller ↔ Server ↔ Receiver
+→ exchange offer/answer
+→ kết nối trực tiếp
+8. Bước 7: Thêm nhạc chuông
+Flutter:
+final player = AudioPlayer();
+player.play(AssetSource("ringtone.mp3"));
+9. Bước 8: Tối ưu cho người già
+
+Bạn nên thêm:
+
+nút to
+chữ lớn
+auto gọi nếu không phản hồi
+xác nhận nhẹ:
+"Bác có muốn gọi con trai không ạ?"
+

@@ -1,21 +1,390 @@
+const PIN_TOKEN_KEY = "ut_nguyen_pin_token";
+const DEVICE_ID_KEY = "ut_nguyen_device_id";
+
+const views = {
+  auth: document.getElementById("authView"),
+  pinSetup: document.getElementById("pinSetupView"),
+  pinUnlock: document.getElementById("pinUnlockView"),
+  app: document.getElementById("appView")
+};
+
+const banner = document.getElementById("messageBanner");
+const welcomeName = document.getElementById("welcomeName");
+const pinUnlockName = document.getElementById("pinUnlockName");
+const installAppBtn = document.getElementById("installAppBtn");
+
+const authTabButtons = [...document.querySelectorAll("[data-auth-tab]")];
+const authPanels = [...document.querySelectorAll("[data-auth-panel]")];
+const sectionTabs = [...document.querySelectorAll(".section-tab")];
+
+const sections = {
+  chat: document.getElementById("chatSection"),
+  family: document.getElementById("familySection"),
+  account: document.getElementById("accountSection")
+};
+
+const authForms = {
+  login: document.getElementById("loginForm"),
+  register: document.getElementById("registerForm"),
+  forgot: document.getElementById("forgotForm"),
+  reset: document.getElementById("resetForm")
+};
+
+const pinSetupForm = document.getElementById("pinSetupForm");
+const pinUnlockForm = document.getElementById("pinUnlockForm");
+const profileForm = document.getElementById("profileForm");
+const changePasswordForm = document.getElementById("changePasswordForm");
+const createFamilyForm = document.getElementById("createFamilyForm");
+const renameFamilyForm = document.getElementById("renameFamilyForm");
+const inviteFamilyForm = document.getElementById("inviteFamilyForm");
+const logoutBtn = document.getElementById("logoutBtn");
+
+const familySummaryText = document.getElementById("familySummaryText");
+const familyMembersList = document.getElementById("familyMembersList");
+const familyInvitationsList = document.getElementById("familyInvitationsList");
+const renameFamilyInput = document.getElementById("renameFamilyInput");
+
 const chatLog = document.getElementById("chatLog");
 const chatForm = document.getElementById("chatForm");
 const messageInput = document.getElementById("messageInput");
 const sendBtn = document.getElementById("sendBtn");
 const voiceBtn = document.getElementById("voiceBtn");
 const clearSpeechBtn = document.getElementById("clearSpeechBtn");
-const installAppBtn = document.getElementById("installAppBtn");
-const installHint = document.getElementById("installHint");
 const statusText = document.getElementById("statusText");
 const avatarFrame = document.getElementById("avatarFrame");
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let isWaitingForReply = false;
+
+const state = {
+  bootstrap: null,
+  me: null,
+  family: null,
+  invitations: [],
+  activeSection: "chat",
+  isWaitingForReply: false
+};
+
+let deferredInstallPrompt = null;
+let activeRecognition = null;
 let availableVoices = [];
 let preferredVietnameseVoice = null;
 let missingVietnameseVoiceNotified = false;
-let activeRecognition = null;
-let deferredInstallPrompt = null;
+
+function getDeviceId() {
+  let deviceId = window.localStorage.getItem(DEVICE_ID_KEY);
+  if (!deviceId) {
+    deviceId = window.crypto?.randomUUID?.() || `device-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    window.localStorage.setItem(DEVICE_ID_KEY, deviceId);
+  }
+  return deviceId;
+}
+
+function getDeviceName() {
+  const platform = window.navigator.platform || "Thiết bị";
+  return `${platform} - ${window.navigator.userAgent.slice(0, 60)}`;
+}
+
+function getPinToken() {
+  return window.sessionStorage.getItem(PIN_TOKEN_KEY) || "";
+}
+
+function setPinToken(token) {
+  if (!token) {
+    window.sessionStorage.removeItem(PIN_TOKEN_KEY);
+    return;
+  }
+  window.sessionStorage.setItem(PIN_TOKEN_KEY, token);
+}
+
+function showBanner(message, type = "info") {
+  if (!message) {
+    banner.textContent = "";
+    banner.classList.add("hidden");
+    banner.classList.remove("is-error");
+    return;
+  }
+
+  banner.textContent = message;
+  banner.classList.remove("hidden");
+  banner.classList.toggle("is-error", type === "error");
+}
+
+function setStatus(message) {
+  statusText.textContent = message;
+}
+
+function setAvatarState(stateName) {
+  avatarFrame.classList.remove("is-listening", "is-speaking");
+  voiceBtn.classList.remove("is-listening");
+
+  if (stateName === "listening") {
+    avatarFrame.classList.add("is-listening");
+    voiceBtn.classList.add("is-listening");
+  }
+
+  if (stateName === "speaking") {
+    avatarFrame.classList.add("is-speaking");
+  }
+}
+
+function setComposerDisabled(disabled) {
+  state.isWaitingForReply = disabled;
+  sendBtn.disabled = disabled;
+  voiceBtn.disabled = disabled;
+  messageInput.disabled = disabled;
+}
+
+function showView(viewName) {
+  Object.entries(views).forEach(([key, element]) => {
+    element.classList.toggle("hidden", key !== viewName);
+  });
+}
+
+function setAuthTab(tabName) {
+  authTabButtons.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.authTab === tabName);
+  });
+
+  authPanels.forEach((panel) => {
+    panel.classList.toggle("hidden", panel.dataset.authPanel !== tabName);
+  });
+}
+
+function setSection(sectionName) {
+  state.activeSection = sectionName;
+  sectionTabs.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.section === sectionName);
+  });
+
+  Object.entries(sections).forEach(([key, element]) => {
+    element.classList.toggle("hidden", key !== sectionName);
+  });
+}
+
+function normalizeErrorMessage(error, fallback) {
+  return error?.message || fallback;
+}
+
+async function requestJson(url, options = {}, authMode = "pin") {
+  const headers = {
+    ...(options.headers || {})
+  };
+
+  if (options.body && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  if (authMode === "pin") {
+    const pinToken = getPinToken();
+    if (pinToken) {
+      headers["X-PIN-Token"] = pinToken;
+    }
+  }
+
+  const response = await fetch(url, { ...options, headers });
+  let data = null;
+
+  try {
+    data = await response.json();
+  } catch (error) {
+    data = null;
+  }
+
+  if (!response.ok) {
+    const err = new Error(data?.error || "Yêu cầu chưa thành công.");
+    err.code = data?.code || "";
+    err.status = response.status;
+    throw err;
+  }
+
+  return data;
+}
+
+async function handleProtectedError(error) {
+  if (error?.code === "pin_required") {
+    setPinToken("");
+    showView("pinUnlock");
+    showBanner("Bạn hãy nhập PIN để tiếp tục.", "error");
+    return true;
+  }
+
+  if (error?.code === "pin_not_configured") {
+    setPinToken("");
+    showView("pinSetup");
+    showBanner("Thiết bị này chưa có PIN. Bạn hãy tạo PIN 4 số trước nhé.", "error");
+    return true;
+  }
+
+  if (error?.code === "auth_required") {
+    setPinToken("");
+    showView("auth");
+    showBanner("Phiên đăng nhập đã hết hoặc đã bị thu hồi.", "error");
+    return true;
+  }
+
+  return false;
+}
+
+function applyBootstrap(bootstrap) {
+  state.bootstrap = bootstrap;
+  if (bootstrap?.user?.full_name) {
+    welcomeName.textContent = bootstrap.user.full_name;
+    pinUnlockName.textContent = `${bootstrap.user.full_name}, bạn hãy nhập PIN để vào app.`;
+  }
+}
+
+function fillProfile(user) {
+  if (!user) {
+    return;
+  }
+
+  document.getElementById("profileFullName").value = user.full_name || "";
+  document.getElementById("profileAge").value = user.age || "";
+  document.getElementById("profileEmail").value = user.email || "";
+  document.getElementById("profilePhone").value = user.phone_number || "";
+}
+
+function renderFamilyState() {
+  const family = state.family;
+  const invitations = state.invitations || [];
+  const isAdmin = family?.role === "admin";
+
+  familySummaryText.textContent = family
+    ? `${family.family_name} • Vai trò của bạn: ${family.role === "admin" ? "admin" : "thành viên"}`
+    : "Bạn chưa tham gia nhóm gia đình nào.";
+
+  createFamilyForm.classList.toggle("hidden", Boolean(family));
+  renameFamilyForm.classList.toggle("hidden", !family || !isAdmin);
+  inviteFamilyForm.classList.toggle("hidden", !family || !isAdmin);
+
+  if (family) {
+    renameFamilyInput.value = family.family_name || "";
+  }
+
+  if (!family || !family.members?.length) {
+    familyMembersList.className = "list-stack empty-state";
+    familyMembersList.textContent = family ? "Nhóm này chưa có thành viên nào." : "Tạo hoặc tham gia nhóm gia đình để thấy danh sách thành viên.";
+  } else {
+    familyMembersList.className = "list-stack";
+    familyMembersList.innerHTML = family.members.map((member) => {
+      const roleLabel = member.role === "admin" ? "Admin" : "Thành viên";
+      const currentUser = state.me?.user?.id === member.user_id;
+      const roleAction = isAdmin
+        ? `<button class="inline-btn" data-action="toggle-role" data-member-id="${member.membership_id}" data-role="${member.role === "admin" ? "member" : "admin"}">${member.role === "admin" ? "Hạ xuống member" : "Nâng lên admin"}</button>`
+        : "";
+      const removeAction = (isAdmin || currentUser)
+        ? `<button class="inline-btn danger" data-action="remove-member" data-member-id="${member.membership_id}">${currentUser ? "Rời nhóm" : "Xóa khỏi nhóm"}</button>`
+        : "";
+
+      return `
+        <article class="list-item">
+          <div>
+            <strong>${member.full_name}</strong>
+            <div class="muted-text">${roleLabel} • ${member.email} • ${member.phone_number}</div>
+          </div>
+          <div class="list-actions">${roleAction}${removeAction}</div>
+        </article>
+      `;
+    }).join("");
+  }
+
+  if (!invitations.length) {
+    familyInvitationsList.className = "list-stack empty-state";
+    familyInvitationsList.textContent = "Bạn chưa có lời mời nào.";
+  } else {
+    familyInvitationsList.className = "list-stack";
+    familyInvitationsList.innerHTML = invitations.map((invitation) => `
+      <article class="list-item">
+        <div>
+          <strong>${invitation.family_name}</strong>
+          <div class="muted-text">Mời bởi ${invitation.invited_by_name}</div>
+        </div>
+        <div class="list-actions">
+          <button class="inline-btn" data-action="respond-invite" data-invitation-id="${invitation.id}" data-response="accept">Chấp nhận</button>
+          <button class="inline-btn danger" data-action="respond-invite" data-invitation-id="${invitation.id}" data-response="decline">Từ chối</button>
+        </div>
+      </article>
+    `).join("");
+  }
+}
+
+function ensureInitialMessage() {
+  if (chatLog.children.length) {
+    return;
+  }
+
+  createMessage("assistant", "Dạ, tôi đã sẵn sàng. Bạn có thể gõ tin nhắn hoặc bấm nút Nói để bắt đầu.");
+}
+
+async function loadProtectedState() {
+  try {
+    const data = await requestJson("/api/me", { method: "GET" }, "pin");
+    state.me = data;
+    state.family = data.family;
+    state.invitations = data.invitations || [];
+    welcomeName.textContent = data.user.full_name || "Người dùng";
+    fillProfile(data.user);
+    renderFamilyState();
+    ensureInitialMessage();
+  } catch (error) {
+    if (await handleProtectedError(error)) {
+      return;
+    }
+    showBanner(normalizeErrorMessage(error, "Không tải được dữ liệu tài khoản."), "error");
+  }
+}
+
+async function bootstrapSession() {
+  showBanner("");
+
+  try {
+    const bootstrap = await requestJson("/api/bootstrap", { method: "GET" }, "none");
+    applyBootstrap(bootstrap);
+
+    if (!bootstrap.authenticated) {
+      showView("auth");
+      setAuthTab("login");
+      setPinToken("");
+      return;
+    }
+
+    if (!bootstrap.pin_configured) {
+      showView("pinSetup");
+      return;
+    }
+
+    if (!getPinToken()) {
+      showView("pinUnlock");
+      return;
+    }
+
+    showView("app");
+    setSection(state.activeSection);
+    await loadProtectedState();
+  } catch (error) {
+    showView("auth");
+    setAuthTab("login");
+    showBanner(normalizeErrorMessage(error, "Không kết nối được đến hệ thống."), "error");
+  }
+}
+
+function createMessage(role, text) {
+  const wrapper = document.createElement("article");
+  wrapper.className = `message ${role}`;
+
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = role === "user" ? "Bạn" : "Trợ lý";
+
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = text;
+
+  wrapper.append(meta, body);
+  chatLog.appendChild(wrapper);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return body;
+}
 
 function normalizeVoiceLang(lang = "") {
   return lang.toLowerCase().replace(/_/g, "-");
@@ -50,8 +419,6 @@ function scoreVietnameseVoice(voice) {
 
 function refreshSpeechVoices() {
   if (!("speechSynthesis" in window)) {
-    availableVoices = [];
-    preferredVietnameseVoice = null;
     return;
   }
 
@@ -65,7 +432,7 @@ function refreshSpeechVoices() {
   }
 }
 
-function waitForVoices(timeoutMs = 1500) {
+async function waitForVoices(timeoutMs = 1500) {
   return new Promise((resolve) => {
     if (!("speechSynthesis" in window)) {
       resolve(null);
@@ -79,215 +446,85 @@ function waitForVoices(timeoutMs = 1500) {
     }
 
     let finished = false;
-    let previousHandler = null;
+    const timerId = window.setTimeout(finish, timeoutMs);
 
-    const finish = () => {
+    function finish() {
       if (finished) {
         return;
       }
 
       finished = true;
       window.clearTimeout(timerId);
-
       if (typeof window.speechSynthesis.removeEventListener === "function") {
-        window.speechSynthesis.removeEventListener("voiceschanged", handleVoicesChanged);
-      } else if (window.speechSynthesis.onvoiceschanged === handleVoicesChanged) {
-        window.speechSynthesis.onvoiceschanged = previousHandler;
+        window.speechSynthesis.removeEventListener("voiceschanged", finish);
       }
-
       refreshSpeechVoices();
       resolve(preferredVietnameseVoice);
-    };
-
-    const handleVoicesChanged = () => {
-      finish();
-    };
-
-    const timerId = window.setTimeout(finish, timeoutMs);
+    }
 
     if (typeof window.speechSynthesis.addEventListener === "function") {
-      window.speechSynthesis.addEventListener("voiceschanged", handleVoicesChanged);
-    } else {
-      previousHandler = window.speechSynthesis.onvoiceschanged;
-      window.speechSynthesis.onvoiceschanged = (...args) => {
-        if (typeof previousHandler === "function") {
-          previousHandler.apply(window.speechSynthesis, args);
-        }
-        handleVoicesChanged();
-      };
+      window.speechSynthesis.addEventListener("voiceschanged", finish);
     }
   });
 }
 
 if ("speechSynthesis" in window) {
   refreshSpeechVoices();
-
   if (typeof window.speechSynthesis.addEventListener === "function") {
     window.speechSynthesis.addEventListener("voiceschanged", refreshSpeechVoices);
-  } else {
-    window.speechSynthesis.onvoiceschanged = refreshSpeechVoices;
   }
 }
 
-function setInstallHint(message = "") {
-  if (!installHint) {
+async function speak(text) {
+  if (!("speechSynthesis" in window) || !text.trim()) {
     return;
   }
 
-  installHint.textContent = message;
-  installHint.hidden = !message;
-}
+  await waitForVoices();
+  window.speechSynthesis.cancel();
+  setAvatarState("speaking");
 
-function isStandaloneMode() {
-  return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
-}
-
-function isIosDevice() {
-  return /iPad|iPhone|iPod/.test(window.navigator.userAgent)
-    || (window.navigator.platform === "MacIntel" && window.navigator.maxTouchPoints > 1);
-}
-
-function isAndroidDevice() {
-  return /Android/i.test(window.navigator.userAgent);
-}
-
-function isInAppBrowser() {
-  return /Zalo|FBAN|FBAV|Instagram|Line|; wv\)|\bwv\b/i.test(window.navigator.userAgent);
-}
-
-function isSafariBrowser() {
-  const userAgent = window.navigator.userAgent;
-  return /Safari/i.test(userAgent) && !/CriOS|FxiOS|EdgiOS|OPiOS|Zalo|FBAN|FBAV|Instagram/i.test(userAgent);
-}
-
-function updateInstallButton() {
-  if (!installAppBtn) {
-    return;
+  if (!preferredVietnameseVoice && !missingVietnameseVoiceNotified) {
+    setStatus("Thiết bị chưa có giọng đọc tiếng Việt, ứng dụng sẽ dùng giọng mặc định.");
+    missingVietnameseVoiceNotified = true;
   }
 
-  if (isStandaloneMode()) {
-    installAppBtn.hidden = true;
-    setInstallHint("Ứng dụng đã được cài trên thiết bị này.");
-    return;
-  }
+  const sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
 
-  installAppBtn.hidden = false;
-  installAppBtn.disabled = false;
-  installAppBtn.textContent = "Cài app";
+  let index = 0;
 
-  if (deferredInstallPrompt) {
-    setInstallHint("Thiết bị này hỗ trợ cài nhanh. Bạn bấm Cài app để thêm ra màn hình chính.");
-    return;
-  }
-
-  setInstallHint("");
-}
-
-async function handleInstallApp() {
-  if (isStandaloneMode()) {
-    setInstallHint("Ứng dụng đã được cài trên thiết bị này.");
-    return;
-  }
-
-  if (deferredInstallPrompt) {
-    deferredInstallPrompt.prompt();
-    const choiceResult = await deferredInstallPrompt.userChoice;
-    deferredInstallPrompt = null;
-    updateInstallButton();
-
-    if (choiceResult.outcome === "accepted") {
-      setInstallHint("Đang thêm ứng dụng vào màn hình chính của bạn.");
-    } else {
-      setInstallHint("Bạn có thể bấm lại Cài app bất cứ lúc nào khi muốn.");
+  function speakNext() {
+    if (index >= sentences.length) {
+      setAvatarState("");
+      return;
     }
-    return;
-  }
 
-  if (isInAppBrowser()) {
-    setInstallHint("Bạn đang mở trong trình duyệt tích hợp của ứng dụng khác. Hãy mở link này bằng Chrome hoặc Safari rồi bấm Cài app.");
-    return;
-  }
-
-  if (isIosDevice()) {
-    if (isSafariBrowser()) {
-      setInstallHint("Trên iPhone hoặc iPad, hãy bấm Chia sẻ rồi chọn Thêm vào Màn hình chính.");
-    } else {
-      setInstallHint("Trên iPhone hoặc iPad, hãy mở link này bằng Safari rồi chọn Chia sẻ và Thêm vào Màn hình chính.");
+    const utterance = new SpeechSynthesisUtterance(sentences[index]);
+    utterance.lang = preferredVietnameseVoice?.lang || "vi-VN";
+    if (preferredVietnameseVoice) {
+      utterance.voice = preferredVietnameseVoice;
     }
-    return;
+    utterance.rate = 0.9;
+    utterance.onend = () => {
+      index += 1;
+      speakNext();
+    };
+    utterance.onerror = () => {
+      setAvatarState("");
+      setStatus("Không phát được giọng đọc. Bạn thử lại giúp tôi nhé.");
+    };
+    window.speechSynthesis.speak(utterance);
   }
 
-  if (isAndroidDevice()) {
-    setInstallHint("Nếu chưa thấy cửa sổ cài đặt, bạn mở menu trình duyệt rồi chọn Add to Home screen hoặc Install app.");
-    return;
-  }
-
-  setInstallHint("Trình duyệt này chưa hiện cửa sổ cài tự động. Bạn thử menu của trình duyệt để tìm mục Install app hoặc Add to Home Screen.");
-}
-
-window.addEventListener("beforeinstallprompt", (event) => {
-  event.preventDefault();
-  deferredInstallPrompt = event;
-  updateInstallButton();
-});
-
-window.addEventListener("appinstalled", () => {
-  deferredInstallPrompt = null;
-  updateInstallButton();
-  setInstallHint("Đã cài ứng dụng thành công. Bạn có thể mở từ màn hình chính.");
-});
-
-function setStatus(message) {
-  statusText.textContent = message;
-}
-
-function setAvatarState(state) {
-  avatarFrame.classList.remove("is-listening", "is-speaking");
-  voiceBtn.classList.remove("is-listening");
-
-  if (state === "listening") {
-    avatarFrame.classList.add("is-listening");
-    voiceBtn.classList.add("is-listening");
-  }
-
-  if (state === "speaking") {
-    avatarFrame.classList.add("is-speaking");
-  }
-}
-
-function createMessage(role, text) {
-  const wrapper = document.createElement("article");
-  wrapper.className = `message ${role}`;
-
-  const meta = document.createElement("span");
-  meta.className = "meta";
-  meta.textContent = role === "user" ? "Bạn" : "Trợ lý";
-
-  const body = document.createElement("div");
-  body.className = "body";
-  body.textContent = text;
-
-  wrapper.append(meta, body);
-  chatLog.appendChild(wrapper);
-
-  while (chatLog.children.length > 2) {
-    chatLog.removeChild(chatLog.firstElementChild);
-  }
-
-  chatLog.scrollTop = chatLog.scrollHeight;
-  return body;
-}
-
-function setComposerDisabled(disabled) {
-  isWaitingForReply = disabled;
-  sendBtn.disabled = disabled;
-  voiceBtn.disabled = disabled;
-  messageInput.disabled = disabled;
+  speakNext();
 }
 
 async function sendMessage(text) {
   const content = text.trim();
-  if (!content || isWaitingForReply) {
+  if (!content || state.isWaitingForReply) {
     return;
   }
 
@@ -300,32 +537,37 @@ async function sendMessage(text) {
   try {
     const response = await fetch("/chat_stream", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-PIN-Token": getPinToken()
+      },
       body: JSON.stringify({ message: content })
     });
 
     if (!response.ok) {
-      let errorMessage = "Không gửi được câu hỏi.";
+      let errorData = null;
       try {
-        const data = await response.json();
-        errorMessage = data.error || errorMessage;
+        errorData = await response.json();
       } catch (error) {
-        // Keep default error message when body is not JSON.
+        errorData = null;
       }
-      assistantBody.textContent = errorMessage;
-      setStatus("Co loi khi gui du lieu.");
+
+      const err = new Error(errorData?.error || "Không gửi được câu hỏi.");
+      err.code = errorData?.code || "";
+      if (await handleProtectedError(err)) {
+        assistantBody.textContent = "Phiên mở khóa đã hết. Bạn nhập lại PIN rồi thử tiếp nhé.";
+        return;
+      }
+      assistantBody.textContent = err.message;
       return;
     }
 
-    if (!response.body) {
-      const plainText = await response.text();
-      assistantBody.textContent = plainText.trim() || "Tôi chưa nhận được nội dung phản hồi.";
-      setStatus("Đã nhận xong câu trả lời.");
-      window.setTimeout(() => speak(assistantBody.textContent), 500);
+    const reader = response.body?.getReader();
+    if (!reader) {
+      assistantBody.textContent = "Tôi chưa nhận được nội dung phản hồi.";
       return;
     }
 
-    const reader = response.body.getReader();
     const decoder = new TextDecoder("utf-8");
     let fullText = "";
 
@@ -345,10 +587,10 @@ async function sendMessage(text) {
     setStatus("Đã nhận xong câu trả lời.");
 
     if (assistantBody.textContent.trim()) {
-      window.setTimeout(() => speak(assistantBody.textContent), 500);
+      window.setTimeout(() => speak(assistantBody.textContent), 300);
     }
   } catch (error) {
-    assistantBody.textContent = "Có lỗi kết nối đến server. Bạn thử tải lại trang hoặc kiểm tra backend nhé.";
+    assistantBody.textContent = normalizeErrorMessage(error, "Có lỗi kết nối đến server.");
     setStatus("Mất kết nối đến server.");
   } finally {
     setComposerDisabled(false);
@@ -359,17 +601,15 @@ async function sendMessage(text) {
 
 function startVoice() {
   if (!SpeechRecognition) {
-    setStatus("Trình duyệt này chưa hỗ trợ nhận giọng nói. Trên điện thoại, bạn nên thử Chrome Android.");
+    setStatus("Trình duyệt này chưa hỗ trợ nhận giọng nói. Bạn nên thử Chrome trên Android.");
     return;
   }
 
   if (activeRecognition) {
     activeRecognition.abort();
-    activeRecognition = null;
   }
 
   window.speechSynthesis.cancel();
-
   const recognition = new SpeechRecognition();
   let transcript = "";
   let submitted = false;
@@ -400,22 +640,8 @@ function startVoice() {
     sendMessage(transcript);
   };
 
-  recognition.onnomatch = () => {
-    setStatus("Tôi chưa nhận ra câu nói rõ ràng. Bạn thử nói chậm và gần micro hơn nhé.");
-    setAvatarState("");
-  };
-
-  recognition.onerror = (event) => {
-    const errorMessages = {
-      "audio-capture": "Điện thoại chưa dùng được micro. Bạn kiểm tra quyền micro giúp tôi nhé.",
-      "network": "Trình duyệt không gửi được giọng nói lên dịch vụ nhận diện. Bạn kiểm tra mạng rồi thử lại nhé.",
-      "no-speech": "Tôi chưa nghe thấy tiếng nói rõ ràng. Bạn thử nói lại giúp tôi nhé.",
-      "not-allowed": "Trình duyệt đang chặn quyền micro. Bạn hãy bật quyền micro cho trang này.",
-      "service-not-allowed": "Thiết bị hoặc trình duyệt này không cho dùng nhận giọng nói từ web.",
-      "aborted": "Đã dừng nghe giọng nói."
-    };
-
-    setStatus(errorMessages[event.error] || "Không thể nhận giọng nói trên trình duyệt này. Bạn thử Chrome trên Android hoặc nhập tay.");
+  recognition.onerror = () => {
+    setStatus("Tôi chưa nghe được rõ. Bạn thử nói chậm và gần micro hơn nhé.");
     setAvatarState("");
   };
 
@@ -423,17 +649,8 @@ function startVoice() {
     if (activeRecognition === recognition) {
       activeRecognition = null;
     }
-
-    if (!submitted && transcript.trim()) {
-      submitted = true;
-      messageInput.value = transcript.trim();
-      setStatus("Đã nhận giọng nói, đang gửi lên server...");
-      sendMessage(transcript.trim());
-      return;
-    }
-
     setAvatarState("");
-    if (!isWaitingForReply) {
+    if (!state.isWaitingForReply) {
       setStatus("Sẵn sàng trò chuyện.");
     }
   };
@@ -441,77 +658,396 @@ function startVoice() {
   recognition.start();
 }
 
-async function speak(text) {
-  if (!("speechSynthesis" in window) || !text.trim()) {
+function isStandaloneMode() {
+  return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+
+function updateInstallButton() {
+  if (isStandaloneMode()) {
+    installAppBtn.classList.add("hidden");
+    return;
+  }
+  installAppBtn.classList.remove("hidden");
+}
+
+async function handleInstallApp() {
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    updateInstallButton();
     return;
   }
 
-  await waitForVoices();
-  window.speechSynthesis.cancel();
-  setAvatarState("speaking");
+  showBanner("Nếu trình duyệt chưa hiện hộp cài đặt, bạn hãy mở menu rồi chọn Add to Home Screen hoặc Install app.");
+}
 
-  if (!preferredVietnameseVoice && !missingVietnameseVoiceNotified) {
-    setStatus("Thiết bị chưa có giọng đọc tiếng Việt, ứng dụng đang dùng giọng mặc định.");
-    missingVietnameseVoiceNotified = true;
+async function submitLogin(event) {
+  event.preventDefault();
+  showBanner("");
+
+  const payload = {
+    identifier: document.getElementById("loginIdentifier").value.trim(),
+    password: document.getElementById("loginPassword").value,
+    device_id: getDeviceId(),
+    device_name: getDeviceName()
+  };
+
+  try {
+    const data = await requestJson("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }, "none");
+    applyBootstrap(data.bootstrap);
+    setPinToken("");
+    showBanner(data.message);
+    showView(data.bootstrap.pin_configured ? "pinUnlock" : "pinSetup");
+    authForms.login.reset();
+  } catch (error) {
+    showBanner(normalizeErrorMessage(error, "Đăng nhập chưa thành công."), "error");
+  }
+}
+
+async function submitRegister(event) {
+  event.preventDefault();
+  showBanner("");
+
+  const payload = {
+    full_name: document.getElementById("registerFullName").value.trim(),
+    age: document.getElementById("registerAge").value.trim(),
+    email: document.getElementById("registerEmail").value.trim(),
+    phone_number: document.getElementById("registerPhone").value.trim(),
+    password: document.getElementById("registerPassword").value,
+    device_id: getDeviceId(),
+    device_name: getDeviceName()
+  };
+
+  try {
+    const data = await requestJson("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }, "none");
+    applyBootstrap(data.bootstrap);
+    setPinToken("");
+    showBanner(data.message);
+    showView("pinSetup");
+    authForms.register.reset();
+  } catch (error) {
+    showBanner(normalizeErrorMessage(error, "Tạo tài khoản chưa thành công."), "error");
+  }
+}
+
+async function submitForgotPassword(event) {
+  event.preventDefault();
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ email: document.getElementById("forgotEmail").value.trim() })
+    }, "none");
+
+    if (data.reset_token) {
+      document.getElementById("resetToken").value = data.reset_token;
+      setAuthTab("reset");
+      showBanner(`${data.message} Mã reset: ${data.reset_token}`);
+    } else {
+      showBanner(data.message);
+    }
+  } catch (error) {
+    showBanner(normalizeErrorMessage(error, "Không tạo được mã đặt lại."), "error");
+  }
+}
+
+async function submitResetPassword(event) {
+  event.preventDefault();
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({
+        token: document.getElementById("resetToken").value.trim(),
+        new_password: document.getElementById("resetPassword").value
+      })
+    }, "none");
+    showBanner(data.message);
+    setAuthTab("login");
+    authForms.reset.reset();
+  } catch (error) {
+    showBanner(normalizeErrorMessage(error, "Đặt lại mật khẩu chưa thành công."), "error");
+  }
+}
+
+async function submitPinSetup(event) {
+  event.preventDefault();
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/auth/pin/setup", {
+      method: "POST",
+      body: JSON.stringify({
+        pin: document.getElementById("pinSetupValue").value,
+        confirm_pin: document.getElementById("pinSetupConfirm").value
+      })
+    }, "none");
+    setPinToken(data.pin_token);
+    applyBootstrap(data.bootstrap);
+    pinSetupForm.reset();
+    showView("app");
+    setSection(state.activeSection);
+    showBanner(data.message);
+    await loadProtectedState();
+  } catch (error) {
+    showBanner(normalizeErrorMessage(error, "Thiết lập PIN chưa thành công."), "error");
+  }
+}
+
+async function submitPinUnlock(event) {
+  event.preventDefault();
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/auth/pin/verify", {
+      method: "POST",
+      body: JSON.stringify({ pin: document.getElementById("pinUnlockValue").value })
+    }, "none");
+    setPinToken(data.pin_token);
+    pinUnlockForm.reset();
+    showView("app");
+    setSection(state.activeSection);
+    showBanner(data.message);
+    await loadProtectedState();
+  } catch (error) {
+    showBanner(normalizeErrorMessage(error, "PIN chưa đúng."), "error");
+  }
+}
+
+async function submitProfile(event) {
+  event.preventDefault();
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/me", {
+      method: "PATCH",
+      body: JSON.stringify({
+        full_name: document.getElementById("profileFullName").value.trim(),
+        age: document.getElementById("profileAge").value.trim(),
+        email: document.getElementById("profileEmail").value.trim(),
+        phone_number: document.getElementById("profilePhone").value.trim()
+      })
+    });
+    state.me = { ...state.me, user: data.user };
+    welcomeName.textContent = data.user.full_name;
+    showBanner(data.message);
+  } catch (error) {
+    if (await handleProtectedError(error)) {
+      return;
+    }
+    showBanner(normalizeErrorMessage(error, "Không cập nhật được hồ sơ."), "error");
+  }
+}
+
+async function submitChangePassword(event) {
+  event.preventDefault();
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/me/change-password", {
+      method: "POST",
+      body: JSON.stringify({
+        new_password: document.getElementById("changePasswordValue").value,
+        confirm_password: document.getElementById("changePasswordConfirm").value
+      })
+    });
+    changePasswordForm.reset();
+    showBanner(data.message);
+  } catch (error) {
+    if (await handleProtectedError(error)) {
+      return;
+    }
+    showBanner(normalizeErrorMessage(error, "Không đổi được mật khẩu."), "error");
+  }
+}
+
+async function submitCreateFamily(event) {
+  event.preventDefault();
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/families", {
+      method: "POST",
+      body: JSON.stringify({ family_name: document.getElementById("familyNameInput").value.trim() })
+    });
+    state.family = data.family;
+    state.invitations = [];
+    createFamilyForm.reset();
+    renderFamilyState();
+    showBanner(data.message);
+  } catch (error) {
+    if (await handleProtectedError(error)) {
+      return;
+    }
+    showBanner(normalizeErrorMessage(error, "Không tạo được nhóm gia đình."), "error");
+  }
+}
+
+async function submitRenameFamily(event) {
+  event.preventDefault();
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/families/current", {
+      method: "PATCH",
+      body: JSON.stringify({ family_name: renameFamilyInput.value.trim() })
+    });
+    state.family = data.family;
+    renderFamilyState();
+    showBanner(data.message);
+  } catch (error) {
+    if (await handleProtectedError(error)) {
+      return;
+    }
+    showBanner(normalizeErrorMessage(error, "Không đổi được tên nhóm."), "error");
+  }
+}
+
+async function submitInviteFamily(event) {
+  event.preventDefault();
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/families/current/invitations", {
+      method: "POST",
+      body: JSON.stringify({ identifier: document.getElementById("inviteIdentifier").value.trim() })
+    });
+    inviteFamilyForm.reset();
+    showBanner(data.message);
+    await loadProtectedState();
+  } catch (error) {
+    if (await handleProtectedError(error)) {
+      return;
+    }
+    showBanner(normalizeErrorMessage(error, "Không gửi được lời mời."), "error");
+  }
+}
+
+async function handleFamilyAction(event) {
+  const button = event.target.closest("button[data-action]");
+  if (!button) {
+    return;
   }
 
-  const sentences = text
-    .split(/(?<=[.!?])\s+/)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
+  const action = button.dataset.action;
+  showBanner("");
 
-  let index = 0;
-
-  function speakNext() {
-    if (index >= sentences.length) {
-      setAvatarState("");
-      if (missingVietnameseVoiceNotified && !preferredVietnameseVoice) {
-        setStatus("Máy chưa có voice tiếng Việt nên âm đọc có thể chưa chuẩn.");
-      }
+  try {
+    if (action === "respond-invite") {
+      const data = await requestJson(`/api/families/invitations/${button.dataset.invitationId}/respond`, {
+        method: "POST",
+        body: JSON.stringify({ action: button.dataset.response })
+      });
+      showBanner(data.message);
+      await loadProtectedState();
       return;
     }
 
-    const utterance = new SpeechSynthesisUtterance(sentences[index]);
-    utterance.lang = preferredVietnameseVoice?.lang || "vi-VN";
-    if (preferredVietnameseVoice) {
-      utterance.voice = preferredVietnameseVoice;
+    if (action === "toggle-role") {
+      const data = await requestJson(`/api/families/current/members/${button.dataset.memberId}/role`, {
+        method: "PATCH",
+        body: JSON.stringify({ role: button.dataset.role })
+      });
+      state.family = data.family;
+      renderFamilyState();
+      showBanner(data.message);
+      return;
     }
-    utterance.rate = 0.88;
-    utterance.pitch = 1;
-    utterance.onerror = () => {
-      setAvatarState("");
-      setStatus("Không phát được giọng đọc. Bạn thử tải lại trang giúp tôi nhé.");
-    };
-    utterance.onend = () => {
-      index += 1;
-      speakNext();
-    };
-    window.speechSynthesis.speak(utterance);
-  }
 
-  speakNext();
+    if (action === "remove-member") {
+      const data = await requestJson(`/api/families/current/members/${button.dataset.memberId}`, {
+        method: "DELETE"
+      });
+      state.family = data.family;
+      renderFamilyState();
+      showBanner(data.message);
+      await loadProtectedState();
+    }
+  } catch (error) {
+    if (await handleProtectedError(error)) {
+      return;
+    }
+    showBanner(normalizeErrorMessage(error, "Thao tác gia đình chưa thành công."), "error");
+  }
 }
 
+async function logout() {
+  if (!window.confirm("Bạn có chắc muốn đăng xuất khỏi thiết bị này không?")) {
+    return;
+  }
+
+  try {
+    const data = await requestJson("/api/auth/logout", { method: "POST" }, "none");
+    setPinToken("");
+    state.me = null;
+    state.family = null;
+    state.invitations = [];
+    showView("auth");
+    setAuthTab("login");
+    showBanner(data.message);
+  } catch (error) {
+    showBanner(normalizeErrorMessage(error, "Đăng xuất chưa thành công."), "error");
+  }
+}
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  updateInstallButton();
+});
+
+window.addEventListener("appinstalled", () => {
+  deferredInstallPrompt = null;
+  updateInstallButton();
+});
+
+authTabButtons.forEach((button) => {
+  button.addEventListener("click", () => setAuthTab(button.dataset.authTab));
+});
+
+sectionTabs.forEach((button) => {
+  button.addEventListener("click", () => setSection(button.dataset.section));
+});
+
+authForms.login.addEventListener("submit", submitLogin);
+authForms.register.addEventListener("submit", submitRegister);
+authForms.forgot.addEventListener("submit", submitForgotPassword);
+authForms.reset.addEventListener("submit", submitResetPassword);
+pinSetupForm.addEventListener("submit", submitPinSetup);
+pinUnlockForm.addEventListener("submit", submitPinUnlock);
+profileForm.addEventListener("submit", submitProfile);
+changePasswordForm.addEventListener("submit", submitChangePassword);
+createFamilyForm.addEventListener("submit", submitCreateFamily);
+renameFamilyForm.addEventListener("submit", submitRenameFamily);
+inviteFamilyForm.addEventListener("submit", submitInviteFamily);
+familyMembersList.addEventListener("click", handleFamilyAction);
+familyInvitationsList.addEventListener("click", handleFamilyAction);
+
+logoutBtn.addEventListener("click", logout);
 chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
   sendMessage(messageInput.value);
 });
-
 voiceBtn.addEventListener("click", startVoice);
-installAppBtn.addEventListener("click", () => {
-  handleInstallApp().catch(() => {
-    setInstallHint("Chưa thể mở hộp cài ứng dụng trên thiết bị này. Bạn thử lại hoặc mở bằng Chrome hay Safari.");
-  });
-});
 clearSpeechBtn.addEventListener("click", () => {
   window.speechSynthesis.cancel();
-  setStatus("Đã dừng đọc văn bản.");
   setAvatarState("");
+  setStatus("Đã dừng đọc văn bản.");
+});
+installAppBtn.addEventListener("click", () => {
+  handleInstallApp().catch(() => {
+    showBanner("Chưa thể mở hộp cài ứng dụng trên thiết bị này.", "error");
+  });
 });
 
-createMessage(
-  "assistant",
-  "Dạ, tôi đã sẵn sàng. Bạn có thể gõ tin nhắn hoặc bấm nút Nói để bắt đầu."
-);
-
 updateInstallButton();
+bootstrapSession();

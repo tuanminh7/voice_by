@@ -4,6 +4,7 @@ services:
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    healthCheckPath: /health
     envVars:
       - key: GEMINI_API_KEY
         sync: false
@@ -11,3 +12,9 @@ services:
         value: gemini-2.5-flash
       - key: FLASK_SECRET_KEY
         generateValue: true
+      - key: CALL_PROVIDER
+        value: zegocloud
+      - key: CALL_RING_TIMEOUT_SECONDS
+        value: "25"
+      - key: CALL_MAX_TARGETS
+        value: "3"

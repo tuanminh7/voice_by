@@ -5,71 +5,253 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Trợ lý sức khỏe</title>
   <meta name="theme-color" content="#0f4c81">
-  <meta name="description" content="Trợ lý sức khỏe với giao diện đơn giản, dễ nhìn cho người lớn tuổi.">
+  <meta name="description" content="Trợ lý sức khỏe với đăng nhập bền vững, PIN 4 số và quản lý gia đình.">
   <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-  <div class="app-shell">
-    <header class="app-header">
-      <div class="brand">
-        <span class="brand-mark" aria-hidden="true">+</span>
+  <div class="page-shell">
+    <header class="hero-bar">
+      <div class="hero-brand">
+        <span class="hero-mark" aria-hidden="true">+</span>
         <div>
-          <p class="brand-label">Ứng dụng đồng hành</p>
+          <p class="eyebrow">Ứng dụng đồng hành</p>
           <h1>Trợ lý sức khỏe</h1>
         </div>
       </div>
       <p class="model-chip">Model: {{ model_name }}</p>
     </header>
 
-    <main class="main-stage">
-      <section class="assistant-stage">
-        <div class="avatar-frame" id="avatarFrame" aria-live="polite">
-          <div class="avatar-ring"></div>
-          <div class="avatar-ring avatar-ring-secondary"></div>
-          <img
-            class="avatar-image"
-            src="{{ url_for('static', filename='images/anh1.png') }}"
-            alt="Ảnh đại diện AI"
-          >
+    <main class="page-stage">
+      <section id="messageBanner" class="message-banner hidden" aria-live="polite"></section>
+
+      <section id="authView" class="panel auth-panel hidden">
+        <div class="panel-copy">
+          <p class="eyebrow">Nâng cấp v1</p>
+          <h2>Đăng nhập bền vững cho người lớn tuổi</h2>
+          <p>
+            Đăng ký một lần, những lần sau chỉ cần mở app và nhập PIN 4 số trên đúng thiết bị đang dùng.
+          </p>
         </div>
-        <p class="assistant-caption">Trợ lý đang ở đây để lắng nghe và trả lời thật rõ ràng.</p>
-        <p id="statusText" class="status-pill">Sẵn sàng trò chuyện.</p>
+
+        <div class="auth-switch" role="tablist" aria-label="Chọn biểu mẫu">
+          <button class="tab-toggle is-active" data-auth-tab="login" type="button">Đăng nhập</button>
+          <button class="tab-toggle" data-auth-tab="register" type="button">Đăng ký</button>
+          <button class="tab-toggle" data-auth-tab="forgot" type="button">Quên mật khẩu</button>
+          <button class="tab-toggle" data-auth-tab="reset" type="button">Đặt lại</button>
+        </div>
+
+        <div class="auth-grid">
+          <form id="loginForm" class="card form-card" data-auth-panel="login">
+            <h3>Đăng nhập</h3>
+            <label>Email hoặc số điện thoại
+              <input id="loginIdentifier" name="identifier" type="text" autocomplete="username" required>
+            </label>
+            <label>Mật khẩu
+              <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
+            </label>
+            <button type="submit" class="primary-btn">Vào app</button>
+          </form>
+
+          <form id="registerForm" class="card form-card hidden" data-auth-panel="register">
+            <h3>Tạo tài khoản</h3>
+            <label>Họ tên
+              <input id="registerFullName" name="full_name" type="text" autocomplete="name" required>
+            </label>
+            <label>Tuổi
+              <input id="registerAge" name="age" type="number" min="1" max="120" required>
+            </label>
+            <label>Email
+              <input id="registerEmail" name="email" type="email" autocomplete="email" required>
+            </label>
+            <label>Số điện thoại
+              <input id="registerPhone" name="phone_number" type="tel" autocomplete="tel" required>
+            </label>
+            <label>Mật khẩu
+              <input id="registerPassword" name="password" type="password" autocomplete="new-password" required>
+            </label>
+            <button type="submit" class="primary-btn">Tạo tài khoản</button>
+          </form>
+
+          <form id="forgotForm" class="card form-card hidden" data-auth-panel="forgot">
+            <h3>Quên mật khẩu</h3>
+            <label>Email đã đăng ký
+              <input id="forgotEmail" name="email" type="email" autocomplete="email" required>
+            </label>
+            <button type="submit" class="primary-btn">Tạo mã đặt lại</button>
+            <p class="helper-text">Trong bản local, app sẽ hiện luôn mã reset để bạn thử nhanh.</p>
+          </form>
+
+          <form id="resetForm" class="card form-card hidden" data-auth-panel="reset">
+            <h3>Đặt lại mật khẩu</h3>
+            <label>Mã đặt lại
+              <input id="resetToken" name="token" type="text" required>
+            </label>
+            <label>Mật khẩu mới
+              <input id="resetPassword" name="new_password" type="password" autocomplete="new-password" required>
+            </label>
+            <button type="submit" class="primary-btn">Cập nhật mật khẩu</button>
+          </form>
+        </div>
       </section>
 
-      <section class="conversation-panel" aria-label="Khung hội thoại">
-        <div class="conversation-head">
-          <h2>Khung hội thoại</h2>
-          <button id="clearSpeechBtn" class="quiet-btn" type="button">Dừng đọc</button>
+      <section id="pinSetupView" class="panel pin-panel hidden">
+        <div class="panel-copy">
+          <p class="eyebrow">PIN thiết bị</p>
+          <h2>Tạo PIN 4 số</h2>
+          <p>PIN này chỉ dùng để mở nhanh trên thiết bị hiện tại. Nếu đổi máy hoặc đăng xuất, bạn vẫn cần mật khẩu.</p>
         </div>
-
-        <div id="chatLog" class="chat-log" aria-live="polite"></div>
-
-        <form id="chatForm" class="composer">
-          <label class="sr-only" for="messageInput">Nhập câu hỏi</label>
-          <textarea
-            id="messageInput"
-            rows="2"
-            placeholder="Ví dụ: Hôm nay tôi nên ăn gì để dễ tiêu?"
-            required
-          ></textarea>
-          <div class="composer-actions">
-            <button id="sendBtn" type="submit" class="send-btn">Gửi</button>
-          </div>
+        <form id="pinSetupForm" class="card pin-card">
+          <label>PIN 4 số
+            <input id="pinSetupValue" name="pin" type="password" inputmode="numeric" pattern="\d{4}" maxlength="4" required>
+          </label>
+          <label>Nhập lại PIN
+            <input id="pinSetupConfirm" name="confirm_pin" type="password" inputmode="numeric" pattern="\d{4}" maxlength="4" required>
+          </label>
+          <button type="submit" class="primary-btn">Lưu PIN</button>
         </form>
       </section>
-    </main>
 
-    <footer class="control-dock">
-      <div class="dock-actions">
-        <button id="voiceBtn" type="button" class="mic-button" aria-label="Nói với trợ lý">
-          <span class="mic-icon" aria-hidden="true"></span>
-        </button>
-        <button id="installAppBtn" type="button" class="install-btn">Cài app</button>
-      </div>
-      <p class="dock-text">Chạm vào nút micro để bắt đầu nói với trợ lý.</p>
-      <p id="installHint" class="install-hint" hidden></p>
-    </footer>
+      <section id="pinUnlockView" class="panel pin-panel hidden">
+        <div class="panel-copy">
+          <p class="eyebrow">Mở khóa nhanh</p>
+          <h2>Nhập PIN để vào app</h2>
+          <p id="pinUnlockName">Thiết bị này đã ghi nhớ đăng nhập.</p>
+        </div>
+        <form id="pinUnlockForm" class="card pin-card">
+          <label>PIN 4 số
+            <input id="pinUnlockValue" name="pin" type="password" inputmode="numeric" pattern="\d{4}" maxlength="4" required>
+          </label>
+          <button type="submit" class="primary-btn">Mở khóa</button>
+        </form>
+      </section>
+
+      <section id="appView" class="app-view hidden">
+        <div class="panel topbar-panel">
+          <div>
+            <p class="eyebrow">Xin chào</p>
+            <h2 id="welcomeName">Người dùng</h2>
+          </div>
+          <div class="topbar-actions">
+            <button id="installAppBtn" type="button" class="ghost-btn">Cài app</button>
+            <button id="logoutBtn" type="button" class="danger-btn">Đăng xuất</button>
+          </div>
+        </div>
+
+        <nav class="section-tabs" aria-label="Chọn khu vực chức năng">
+          <button class="section-tab is-active" data-section="chat" type="button">Trợ lý</button>
+          <button class="section-tab" data-section="family" type="button">Gia đình</button>
+          <button class="section-tab" data-section="account" type="button">Tài khoản</button>
+        </nav>
+
+        <section id="chatSection" class="section-panel">
+          <div class="assistant-card panel">
+            <div class="avatar-frame" id="avatarFrame" aria-live="polite">
+              <div class="avatar-ring"></div>
+              <div class="avatar-ring avatar-ring-secondary"></div>
+              <img
+                class="avatar-image"
+                src="{{ url_for('static', filename='images/anh1.png') }}"
+                alt="Ảnh đại diện AI"
+              >
+            </div>
+            <p class="assistant-caption">Trợ lý đang ở đây để lắng nghe và trả lời thật rõ ràng.</p>
+            <p id="statusText" class="status-pill">Sẵn sàng trò chuyện.</p>
+          </div>
+
+          <div class="panel chat-panel">
+            <div class="section-head">
+              <h3>Khung hội thoại</h3>
+              <button id="clearSpeechBtn" type="button" class="ghost-btn">Dừng đọc</button>
+            </div>
+            <div id="chatLog" class="chat-log" aria-live="polite"></div>
+            <form id="chatForm" class="composer">
+              <label class="sr-only" for="messageInput">Nhập câu hỏi</label>
+              <textarea id="messageInput" rows="3" placeholder="Ví dụ: Hôm nay tôi nên ăn gì để dễ tiêu?" required></textarea>
+              <div class="composer-actions">
+                <button id="voiceBtn" type="button" class="voice-btn" aria-label="Nói với trợ lý">Nói</button>
+                <button id="sendBtn" type="submit" class="primary-btn">Gửi</button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <section id="familySection" class="section-panel hidden">
+          <div class="panel stack-panel">
+            <div class="section-head">
+              <h3>Nhóm gia đình</h3>
+              <p id="familySummaryText" class="muted-text">Bạn chưa tham gia nhóm gia đình nào.</p>
+            </div>
+
+            <form id="createFamilyForm" class="card form-card compact-card">
+              <h4>Tạo nhóm gia đình</h4>
+              <label>Tên nhóm
+                <input id="familyNameInput" name="family_name" type="text" required>
+              </label>
+              <button type="submit" class="primary-btn">Tạo nhóm</button>
+            </form>
+
+            <form id="renameFamilyForm" class="card form-card compact-card hidden">
+              <h4>Đổi tên nhóm</h4>
+              <label>Tên nhóm mới
+                <input id="renameFamilyInput" name="family_name" type="text">
+              </label>
+              <button type="submit" class="ghost-btn">Lưu tên mới</button>
+            </form>
+
+            <form id="inviteFamilyForm" class="card form-card compact-card hidden">
+              <h4>Mời thành viên</h4>
+              <label>Email hoặc số điện thoại
+                <input id="inviteIdentifier" name="identifier" type="text">
+              </label>
+              <button type="submit" class="primary-btn">Gửi lời mời</button>
+            </form>
+
+            <div class="card list-card">
+              <h4>Thành viên hiện tại</h4>
+              <div id="familyMembersList" class="list-stack empty-state">Chưa có dữ liệu thành viên.</div>
+            </div>
+
+            <div class="card list-card">
+              <h4>Lời mời đang chờ bạn</h4>
+              <div id="familyInvitationsList" class="list-stack empty-state">Bạn chưa có lời mời nào.</div>
+            </div>
+          </div>
+        </section>
+
+        <section id="accountSection" class="section-panel hidden">
+          <div class="panel account-grid">
+            <form id="profileForm" class="card form-card">
+              <h3>Hồ sơ cá nhân</h3>
+              <label>Họ tên
+                <input id="profileFullName" name="full_name" type="text" required>
+              </label>
+              <label>Tuổi
+                <input id="profileAge" name="age" type="number" min="1" max="120" required>
+              </label>
+              <label>Email
+                <input id="profileEmail" name="email" type="email" required>
+              </label>
+              <label>Số điện thoại
+                <input id="profilePhone" name="phone_number" type="tel" required>
+              </label>
+              <button type="submit" class="primary-btn">Lưu hồ sơ</button>
+            </form>
+
+            <form id="changePasswordForm" class="card form-card">
+              <h3>Đổi mật khẩu</h3>
+              <label>Mật khẩu mới
+                <input id="changePasswordValue" name="new_password" type="password" autocomplete="new-password" required>
+              </label>
+              <label>Nhập lại mật khẩu mới
+                <input id="changePasswordConfirm" name="confirm_password" type="password" autocomplete="new-password" required>
+              </label>
+              <button type="submit" class="primary-btn">Đổi mật khẩu</button>
+            </form>
+          </div>
+        </section>
+      </section>
+    </main>
   </div>
 
   <script src="{{ url_for('static', filename='script.js') }}"></script>

@@ -1,0 +1,32 @@
+name: ut_nguyen_mobile
+description: Mobile app v2 for emergency voice calling with Flutter, Flask and ZEGOCLOUD.
+publish_to: "none"
+
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: any
+  provider: any
+  shared_preferences: any
+  dio: any
+  dio_cookie_manager: any
+  cookie_jar: any
+  path_provider: any
+  speech_to_text: any
+  firebase_core: any
+  firebase_messaging: any
+  zego_uikit_prebuilt_call: any
+  zego_uikit_signaling_plugin: any
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: any
+
+flutter:
+  uses-material-design: true
