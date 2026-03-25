@@ -207,9 +207,41 @@
               <button type="submit" class="primary-btn">Gửi lời mời</button>
             </form>
 
+            <form id="callRelationshipForm" class="card form-card compact-card hidden">
+              <h4>Cấu hình người nhận cuộc gọi</h4>
+              <label>Thành viên cần gọi
+                <select id="callRelativeUserId" name="relative_user_id" required></select>
+              </label>
+              <label>Vai trò trong gia đình
+                <select id="callRelationshipKey" name="relationship_key" required></select>
+              </label>
+              <label>Biệt danh hoặc cách gọi
+                <input id="callCustomAliases" name="custom_aliases" type="text" placeholder="Ví dụ: Minh, anh Hai, chú Út">
+              </label>
+              <label>Thứ tự ưu tiên
+                <input id="callPriorityOrder" name="priority_order" type="number" min="1" value="1" required>
+              </label>
+              <p class="helper-text">Mỗi biệt danh cách nhau bằng dấu phẩy. Bạn có thể nói như "gọi con trai", "gọi Minh", "gọi chú Út".</p>
+              <div class="form-actions">
+                <button id="saveCallRelationshipBtn" type="submit" class="primary-btn">Lưu cấu hình gọi</button>
+                <button id="resetCallRelationshipBtn" type="button" class="ghost-btn">Làm mới</button>
+              </div>
+            </form>
+
             <div class="card list-card">
               <h4>Thành viên hiện tại</h4>
               <div id="familyMembersList" class="list-stack empty-state">Chưa có dữ liệu thành viên.</div>
+            </div>
+
+            <div class="card list-card">
+              <div class="section-head">
+                <div>
+                  <h4>Cấu hình gọi hiện tại</h4>
+                  <p class="muted-text">Danh sách này quyết định AI sẽ gọi ai khi bạn ra lệnh bằng giọng nói.</p>
+                </div>
+                <button id="refreshFamilyBtn" type="button" class="ghost-btn">Làm mới</button>
+              </div>
+              <div id="callRelationshipsList" class="list-stack empty-state">Bạn chưa cấu hình người nhận cuộc gọi nào.</div>
             </div>
 
             <div class="card list-card">

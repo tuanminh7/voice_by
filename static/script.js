@@ -37,11 +37,20 @@ const changePasswordForm = document.getElementById("changePasswordForm");
 const createFamilyForm = document.getElementById("createFamilyForm");
 const renameFamilyForm = document.getElementById("renameFamilyForm");
 const inviteFamilyForm = document.getElementById("inviteFamilyForm");
+const callRelationshipForm = document.getElementById("callRelationshipForm");
+const callRelativeUserIdInput = document.getElementById("callRelativeUserId");
+const callRelationshipKeyInput = document.getElementById("callRelationshipKey");
+const callCustomAliasesInput = document.getElementById("callCustomAliases");
+const callPriorityOrderInput = document.getElementById("callPriorityOrder");
+const saveCallRelationshipBtn = document.getElementById("saveCallRelationshipBtn");
+const resetCallRelationshipBtn = document.getElementById("resetCallRelationshipBtn");
+const refreshFamilyBtn = document.getElementById("refreshFamilyBtn");
 const logoutBtn = document.getElementById("logoutBtn");
 
 const familySummaryText = document.getElementById("familySummaryText");
 const familyMembersList = document.getElementById("familyMembersList");
 const familyInvitationsList = document.getElementById("familyInvitationsList");
+const callRelationshipsList = document.getElementById("callRelationshipsList");
 const renameFamilyInput = document.getElementById("renameFamilyInput");
 
 const chatLog = document.getElementById("chatLog");
@@ -60,6 +69,9 @@ const state = {
   me: null,
   family: null,
   invitations: [],
+  callRelationships: [],
+  supportedRelationships: [],
+  editingCallRelationshipId: null,
   activeSection: "chat",
   isWaitingForReply: false
 };
@@ -161,6 +173,13 @@ function setSection(sectionName) {
   Object.entries(sections).forEach(([key, element]) => {
     element.classList.toggle("hidden", key !== sectionName);
   });
+
+  if (!views.app.classList.contains("hidden")) {
+    startProtectedStatePolling();
+    if (sectionName === "family") {
+      loadProtectedState().catch(() => {});
+    }
+  }
 }
 
 function normalizeErrorMessage(error, fallback) {
@@ -204,6 +223,7 @@ async function requestJson(url, options = {}, authMode = "pin") {
 
 async function handleProtectedError(error) {
   if (error?.code === "pin_required") {
+    stopProtectedStatePolling();
     setPinToken("");
     showView("pinUnlock");
     showBanner("Bạn hãy nhập PIN để tiếp tục.", "error");
@@ -211,6 +231,7 @@ async function handleProtectedError(error) {
   }
 
   if (error?.code === "pin_not_configured") {
+    stopProtectedStatePolling();
     setPinToken("");
     showView("pinSetup");
     showBanner("Thiết bị này chưa có PIN. Bạn hãy tạo PIN 4 số trước nhé.", "error");
@@ -218,6 +239,7 @@ async function handleProtectedError(error) {
   }
 
   if (error?.code === "auth_required") {
+    stopProtectedStatePolling();
     setPinToken("");
     showView("auth");
     showBanner("Phiên đăng nhập đã hết hoặc đã bị thu hồi.", "error");
@@ -246,6 +268,130 @@ function fillProfile(user) {
   document.getElementById("profilePhone").value = user.phone_number || "";
 }
 
+function getFamilyCallCandidates() {
+  const currentUserId = state.me?.user?.id;
+  return (state.family?.members || []).filter((member) => member.user_id !== currentUserId);
+}
+
+function renderCallRelationshipForm() {
+  const family = state.family;
+  const members = getFamilyCallCandidates();
+  const relationships = state.supportedRelationships || [];
+  const editingRelationship = state.callRelationships.find((item) => item.id === state.editingCallRelationshipId) || null;
+  const formIsActive = callRelationshipForm.contains(document.activeElement);
+  const currentRelativeValue = formIsActive
+    ? callRelativeUserIdInput.value
+    : editingRelationship
+    ? String(editingRelationship.relative_user_id)
+    : callRelativeUserIdInput.value;
+  const currentRelationshipKey = formIsActive
+    ? callRelationshipKeyInput.value
+    : editingRelationship
+    ? editingRelationship.relationship_key
+    : callRelationshipKeyInput.value;
+  const currentAliases = formIsActive
+    ? callCustomAliasesInput.value
+    : editingRelationship
+    ? (editingRelationship.custom_aliases || "")
+    : callCustomAliasesInput.value;
+  const currentPriority = formIsActive
+    ? (callPriorityOrderInput.value || "1")
+    : editingRelationship
+    ? String(editingRelationship.priority_order || 1)
+    : (callPriorityOrderInput.value || "1");
+
+  callRelationshipForm.classList.toggle("hidden", !family);
+  refreshFamilyBtn.disabled = !family;
+
+  if (!family) {
+    return;
+  }
+
+  if (!members.length) {
+    callRelativeUserIdInput.innerHTML = '<option value="">Chua co thanh vien khac trong nhom</option>';
+  } else {
+    callRelativeUserIdInput.innerHTML = members.map((member) => `
+      <option value="${member.user_id}">${member.full_name} - ${member.email}</option>
+    `).join("");
+  }
+
+  callRelationshipKeyInput.innerHTML = relationships.map((relationship) => `
+    <option value="${relationship.key}">${relationship.label}</option>
+  `).join("");
+
+  callRelativeUserIdInput.disabled = !members.length;
+  callRelationshipKeyInput.disabled = !members.length || !relationships.length;
+  callCustomAliasesInput.disabled = !members.length;
+  callPriorityOrderInput.disabled = !members.length;
+  saveCallRelationshipBtn.disabled = !members.length || !relationships.length;
+
+  if (members.length) {
+    const fallbackRelativeValue = members[0] ? String(members[0].user_id) : "";
+    callRelativeUserIdInput.value = members.some((member) => String(member.user_id) === currentRelativeValue)
+      ? currentRelativeValue
+      : fallbackRelativeValue;
+  }
+
+  if (relationships.length) {
+    const fallbackRelationshipKey = relationships[0]?.key || "";
+    callRelationshipKeyInput.value = relationships.some((relationship) => relationship.key === currentRelationshipKey)
+      ? currentRelationshipKey
+      : fallbackRelationshipKey;
+  }
+
+  callCustomAliasesInput.value = currentAliases;
+  callPriorityOrderInput.value = currentPriority;
+  saveCallRelationshipBtn.textContent = editingRelationship ? "Cap nhat cau hinh" : "Luu cau hinh goi";
+}
+
+function renderCallRelationshipsList() {
+  const relationships = state.callRelationships || [];
+
+  if (!state.family) {
+    callRelationshipsList.className = "list-stack empty-state";
+    callRelationshipsList.textContent = "Tham gia nhom gia dinh de cai dat cuoc goi.";
+    return;
+  }
+
+  if (!relationships.length) {
+    callRelationshipsList.className = "list-stack empty-state";
+    callRelationshipsList.textContent = "Ban chua cau hinh nguoi nhan cuoc goi nao.";
+    return;
+  }
+
+  callRelationshipsList.className = "list-stack";
+  callRelationshipsList.innerHTML = relationships.map((relationship) => {
+    const aliasText = relationship.custom_alias_list?.length
+      ? `Biet danh: ${relationship.custom_alias_list.join(", ")}`
+      : "Chua dat biet danh rieng";
+
+    return `
+      <article class="list-item">
+        <div>
+          <strong>${relationship.relationship_label} -> ${relationship.relative_full_name}</strong>
+          <div class="muted-text">Uu tien ${relationship.priority_order} - ${aliasText}</div>
+          <div class="muted-text">${relationship.relative_email} - ${relationship.relative_phone_number}</div>
+        </div>
+        <div class="list-actions">
+          <button class="inline-btn" data-action="edit-call-relationship" data-relationship-id="${relationship.id}">Sua</button>
+          <button class="inline-btn danger" data-action="delete-call-relationship" data-relationship-id="${relationship.id}">Xoa</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+function resetCallRelationshipForm() {
+  state.editingCallRelationshipId = null;
+  if (callCustomAliasesInput) {
+    callCustomAliasesInput.value = "";
+  }
+  if (callPriorityOrderInput) {
+    callPriorityOrderInput.value = "1";
+  }
+  renderCallRelationshipForm();
+}
+
 function renderFamilyState() {
   const family = state.family;
   const invitations = state.invitations || [];
@@ -258,6 +404,8 @@ function renderFamilyState() {
   createFamilyForm.classList.toggle("hidden", Boolean(family));
   renameFamilyForm.classList.toggle("hidden", !family || !isAdmin);
   inviteFamilyForm.classList.toggle("hidden", !family || !isAdmin);
+  renderCallRelationshipForm();
+  renderCallRelationshipsList();
 
   if (family) {
     renameFamilyInput.value = family.family_name || "";
@@ -329,6 +477,11 @@ async function loadProtectedState() {
     state.me = data;
     state.family = data.family;
     state.invitations = data.invitations || [];
+    state.callRelationships = data.call_relationships || [];
+    state.supportedRelationships = data.supported_relationships || [];
+    if (state.editingCallRelationshipId && !state.callRelationships.some((item) => item.id === state.editingCallRelationshipId)) {
+      state.editingCallRelationshipId = null;
+    }
     welcomeName.textContent = data.user.full_name || "Người dùng";
     fillProfile(data.user);
     renderFamilyState();
@@ -343,6 +496,10 @@ async function loadProtectedState() {
   }
 }
 
+function getProtectedPollingIntervalMs() {
+  return state.activeSection === "family" ? 3000 : 5000;
+}
+
 function startProtectedStatePolling() {
   stopProtectedStatePolling();
   protectedStateRefreshTimer = window.setInterval(() => {
@@ -351,7 +508,7 @@ function startProtectedStatePolling() {
     }
 
     loadProtectedState().catch(() => {});
-  }, 5000);
+  }, getProtectedPollingIntervalMs());
 }
 
 function stopProtectedStatePolling() {
@@ -432,31 +589,18 @@ function looksLikeCallIntent(text) {
     return false;
   }
 
-  const callKeywords = ["goi", "lien lac", "call"];
-  const roleAliases = [
-    "con trai",
-    "con gai",
-    "chau",
-    "vo",
-    "chong",
-    "anh trai",
-    "em trai",
-    "chi gai",
-    "em gai",
-    "nguoi nha",
-    "nguoi than",
-    "gia dinh",
-    "chu",
-    "bac",
-    "co",
-    "di",
-    "cau",
-    "mo",
-    "thim"
-  ];
+  if (simplified.includes("goi y")) {
+    return false;
+  }
 
-  return callKeywords.some((keyword) => simplified.includes(keyword))
-    && roleAliases.some((alias) => simplified.includes(alias));
+  return [
+    /\bgoi\b/,
+    /\bgoi cho\b/,
+    /\bhay goi\b/,
+    /\bgiup toi goi\b/,
+    /\blien lac\b/,
+    /\bcall\b/
+  ].some((pattern) => pattern.test(simplified));
 }
 
 async function tryCreateVoiceCall(transcriptText) {
@@ -1000,6 +1144,8 @@ async function submitCreateFamily(event) {
     });
     state.family = data.family;
     state.invitations = [];
+    state.callRelationships = [];
+    state.editingCallRelationshipId = null;
     createFamilyForm.reset();
     renderFamilyState();
     showBanner(data.message);
@@ -1051,6 +1197,32 @@ async function submitInviteFamily(event) {
   }
 }
 
+async function submitCallRelationship(event) {
+  event.preventDefault();
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/call-relationships", {
+      method: "POST",
+      body: JSON.stringify({
+        relative_user_id: callRelativeUserIdInput.value,
+        relationship_key: callRelationshipKeyInput.value,
+        custom_aliases: callCustomAliasesInput.value.trim(),
+        priority_order: callPriorityOrderInput.value.trim()
+      })
+    });
+    state.callRelationships = data.relationships || [];
+    resetCallRelationshipForm();
+    renderFamilyState();
+    showBanner(data.message);
+  } catch (error) {
+    if (await handleProtectedError(error)) {
+      return;
+    }
+    showBanner(normalizeErrorMessage(error, "Khong luu duoc cau hinh goi."), "error");
+  }
+}
+
 async function handleFamilyAction(event) {
   const button = event.target.closest("button[data-action]");
   if (!button) {
@@ -1090,6 +1262,27 @@ async function handleFamilyAction(event) {
       renderFamilyState();
       showBanner(data.message);
       await loadProtectedState();
+      return;
+    }
+
+    if (action === "edit-call-relationship") {
+      state.editingCallRelationshipId = Number(button.dataset.relationshipId);
+      renderFamilyState();
+      callRelationshipForm.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+
+    if (action === "delete-call-relationship") {
+      const data = await requestJson(`/api/call-relationships/${button.dataset.relationshipId}`, {
+        method: "DELETE"
+      });
+      state.callRelationships = data.relationships || [];
+      if (state.editingCallRelationshipId === Number(button.dataset.relationshipId)) {
+        state.editingCallRelationshipId = null;
+      }
+      renderFamilyState();
+      showBanner(data.message);
+      return;
     }
   } catch (error) {
     if (await handleProtectedError(error)) {
@@ -1111,6 +1304,8 @@ async function logout() {
     state.me = null;
     state.family = null;
     state.invitations = [];
+    state.callRelationships = [];
+    state.editingCallRelationshipId = null;
     showView("auth");
     setAuthTab("login");
     showBanner(data.message);
@@ -1149,8 +1344,10 @@ changePasswordForm.addEventListener("submit", submitChangePassword);
 createFamilyForm.addEventListener("submit", submitCreateFamily);
 renameFamilyForm.addEventListener("submit", submitRenameFamily);
 inviteFamilyForm.addEventListener("submit", submitInviteFamily);
+callRelationshipForm.addEventListener("submit", submitCallRelationship);
 familyMembersList.addEventListener("click", handleFamilyAction);
 familyInvitationsList.addEventListener("click", handleFamilyAction);
+callRelationshipsList.addEventListener("click", handleFamilyAction);
 
 logoutBtn.addEventListener("click", logout);
 chatForm.addEventListener("submit", (event) => {
@@ -1166,6 +1363,16 @@ clearSpeechBtn.addEventListener("click", () => {
 installAppBtn.addEventListener("click", () => {
   handleInstallApp().catch(() => {
     showBanner("Chưa thể mở hộp cài ứng dụng trên thiết bị này.", "error");
+  });
+});
+
+resetCallRelationshipBtn.addEventListener("click", () => {
+  resetCallRelationshipForm();
+});
+
+refreshFamilyBtn.addEventListener("click", () => {
+  loadProtectedState().catch(() => {
+    showBanner("Khong lam moi duoc du lieu gia dinh.", "error");
   });
 });
 

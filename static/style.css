@@ -44,6 +44,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -53,7 +54,8 @@ button {
 }
 
 textarea,
-input {
+input,
+select {
   width: 100%;
   border: 1px solid #cfdcea;
   border-radius: var(--radius-sm);
@@ -63,7 +65,8 @@ input {
 }
 
 textarea:focus,
-input:focus {
+input:focus,
+select:focus {
   outline: 3px solid rgba(47, 160, 245, 0.18);
   border-color: var(--accent);
 }
@@ -466,6 +469,12 @@ input:focus {
 
 .compact-card {
   gap: 12px;
+}
+
+.form-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .list-card h4 {

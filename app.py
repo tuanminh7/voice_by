@@ -188,6 +188,7 @@ def init_db() -> None:
         owner_user_id INTEGER NOT NULL,
         relative_user_id INTEGER NOT NULL,
         relationship_key TEXT NOT NULL,
+        custom_aliases TEXT NOT NULL DEFAULT '',
         priority_order INTEGER NOT NULL DEFAULT 1,
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
@@ -251,6 +252,12 @@ def init_db() -> None:
 
     db = get_db()
     db.executescript(schema)
+    relationship_columns = {
+        row["name"]
+        for row in db.execute("PRAGMA table_info(family_relationships)").fetchall()
+    }
+    if "custom_aliases" not in relationship_columns:
+        db.execute("ALTER TABLE family_relationships ADD COLUMN custom_aliases TEXT NOT NULL DEFAULT ''")
     db.commit()
 
 
@@ -554,6 +561,8 @@ def me():
             "user": serialize_user(g.current_user),
             "family": build_family_payload(g.current_user["id"]),
             "invitations": list_pending_family_invitations(g.current_user["id"]),
+            "call_relationships": list_call_relationships(g.current_user["id"]),
+            "supported_relationships": build_supported_relationships_payload(),
         }
     )
 
@@ -630,6 +639,8 @@ def current_family():
         {
             "family": build_family_payload(g.current_user["id"]),
             "invitations": list_pending_family_invitations(g.current_user["id"]),
+            "call_relationships": list_call_relationships(g.current_user["id"]),
+            "supported_relationships": build_supported_relationships_payload(),
         }
     )
 
@@ -909,9 +920,7 @@ def get_call_relationships():
     return jsonify(
         {
             "relationships": list_call_relationships(g.current_user["id"]),
-            "supported_relationships": [
-                {"key": key, "label": label} for key, label in RELATIONSHIP_LABELS.items()
-            ],
+            "supported_relationships": build_supported_relationships_payload(),
         }
     )
 
@@ -927,6 +936,7 @@ def upsert_call_relationship():
     relative_user_id_raw = str(payload.get("relative_user_id") or "").strip()
     relationship_key = normalize_relationship_key(payload.get("relationship_key") or "")
     priority_raw = str(payload.get("priority_order") or "1").strip()
+    custom_aliases = normalize_alias_storage(payload.get("custom_aliases") or "")
 
     if not relative_user_id_raw.isdigit():
         return json_error("Thiếu người thân cần cài đặt.", 400, "invalid_relative_user")
@@ -956,19 +966,28 @@ def upsert_call_relationship():
         get_db().execute(
             """
             UPDATE family_relationships
-            SET family_group_id = ?, priority_order = ?, is_active = 1, updated_at = ?
+            SET family_group_id = ?, priority_order = ?, custom_aliases = ?, is_active = 1, updated_at = ?
             WHERE id = ?
             """,
-            (membership["family_group_id"], int(priority_raw), now, existing["id"]),
+            (membership["family_group_id"], int(priority_raw), custom_aliases, now, existing["id"]),
         )
     else:
         get_db().execute(
             """
             INSERT INTO family_relationships (
-                family_group_id, owner_user_id, relative_user_id, relationship_key, priority_order, is_active, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                family_group_id, owner_user_id, relative_user_id, relationship_key, custom_aliases, priority_order, is_active, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
-            (membership["family_group_id"], g.current_user["id"], relative_user_id, relationship_key, int(priority_raw), now, now),
+            (
+                membership["family_group_id"],
+                g.current_user["id"],
+                relative_user_id,
+                relationship_key,
+                custom_aliases,
+                int(priority_raw),
+                now,
+                now,
+            ),
         )
 
     get_db().commit()
@@ -1001,8 +1020,8 @@ def create_call_from_voice_intent():
     if not transcript_text:
         return json_error("Thiếu nội dung giọng nói đã nhận dạng.", 400, "missing_transcript")
 
-    available_relationship_keys = list_relationship_keys(g.current_user["id"])
-    intent = detect_call_intent(transcript_text, available_relationship_keys)
+    relationship_rows = list_call_relationship_rows(g.current_user["id"])
+    intent = detect_call_intent(transcript_text, relationship_rows)
     if intent.get("type") != "call":
         return jsonify({"action": "chat", "message": "Đây chưa phải là lệnh gọi khẩn cấp."})
 
@@ -1018,6 +1037,7 @@ def create_call_from_voice_intent():
     session_row = create_call_session_for_relationship(
         caller_user_id=g.current_user["id"],
         relationship_key=intent["relationship_key"],
+        relative_user_id=intent.get("relative_user_id"),
         transcript_text=transcript_text,
         trigger_source="voice",
     )
@@ -1739,6 +1759,10 @@ def build_bootstrap_payload() -> dict:
     }
 
 
+def build_supported_relationships_payload() -> list[dict]:
+    return [{"key": key, "label": label} for key, label in RELATIONSHIP_LABELS.items()]
+
+
 RELATIONSHIP_LABELS = {
     "son": "con trai",
     "daughter": "con gái",
@@ -1801,7 +1825,28 @@ def normalize_relationship_key(value: str) -> str:
     return RELATIONSHIP_ALIASES.get(simplified, simplified)
 
 
+def split_alias_input(value: str) -> list[str]:
+    raw_parts = re.split(r"[,\n;]+", value or "")
+    aliases: list[str] = []
+    seen: set[str] = set()
+
+    for part in raw_parts:
+        alias = " ".join((part or "").strip().split())
+        simplified = simplify_text(alias)
+        if not simplified or simplified in seen:
+            continue
+        seen.add(simplified)
+        aliases.append(alias)
+
+    return aliases
+
+
+def normalize_alias_storage(value: str) -> str:
+    return ", ".join(split_alias_input(value))
+
+
 def serialize_call_relationship(row: sqlite3.Row) -> dict:
+    alias_list = split_alias_input(row["custom_aliases"])
     return {
         "id": row["id"],
         "family_group_id": row["family_group_id"],
@@ -1809,6 +1854,8 @@ def serialize_call_relationship(row: sqlite3.Row) -> dict:
         "relative_user_id": row["relative_user_id"],
         "relationship_key": row["relationship_key"],
         "relationship_label": RELATIONSHIP_LABELS.get(row["relationship_key"], row["relationship_key"]),
+        "custom_aliases": row["custom_aliases"] or "",
+        "custom_alias_list": alias_list,
         "priority_order": row["priority_order"],
         "relative_full_name": row["relative_full_name"],
         "relative_email": row["relative_email"],
@@ -1845,6 +1892,56 @@ def list_call_relationships(owner_user_id: int) -> list[dict]:
 def list_relationship_keys(owner_user_id: int) -> list[str]:
     rows = list_call_relationship_rows(owner_user_id)
     return sorted({row["relationship_key"] for row in rows})
+
+
+def build_person_call_aliases(relationship_rows: list[sqlite3.Row]) -> dict[str, list[dict]]:
+    alias_map: dict[str, list[dict]] = {}
+
+    def register(alias: str, row: sqlite3.Row) -> None:
+        simplified = simplify_text(alias)
+        if not simplified:
+            return
+
+        entry = {
+            "relationship_key": row["relationship_key"],
+            "relative_user_id": row["relative_user_id"],
+            "relative_full_name": row["relative_full_name"],
+        }
+        bucket = alias_map.setdefault(simplified, [])
+        if not any(
+            existing["relationship_key"] == entry["relationship_key"]
+            and existing["relative_user_id"] == entry["relative_user_id"]
+            for existing in bucket
+        ):
+            bucket.append(entry)
+
+    for row in relationship_rows:
+        register(row["relative_full_name"], row)
+        for alias in split_alias_input(row["custom_aliases"]):
+            register(alias, row)
+
+    return alias_map
+
+
+def build_relationship_call_aliases(relationship_rows: list[sqlite3.Row]) -> dict[str, set[str]]:
+    alias_map: dict[str, set[str]] = {}
+    available_keys = {row["relationship_key"] for row in relationship_rows}
+
+    def register(alias: str, relationship_key: str) -> None:
+        simplified = simplify_text(alias)
+        if not simplified:
+            return
+        alias_map.setdefault(simplified, set()).add(relationship_key)
+
+    for alias, relationship_key in RELATIONSHIP_ALIASES.items():
+        if relationship_key in available_keys:
+            register(alias, relationship_key)
+
+    for row in relationship_rows:
+        relationship_key = row["relationship_key"]
+        register(RELATIONSHIP_LABELS.get(relationship_key, relationship_key), relationship_key)
+
+    return alias_map
 
 
 def fetch_family_membership_record(family_group_id: int, user_id: int) -> sqlite3.Row | None:
@@ -2154,30 +2251,55 @@ def list_call_history(user_id: int) -> list[dict]:
     return [build_call_session_payload(row["id"]) for row in rows]
 
 
-def get_call_target_candidates(owner_user_id: int, relationship_key: str) -> list[sqlite3.Row]:
+def get_call_target_candidates(
+    owner_user_id: int,
+    relationship_key: str,
+    relative_user_id: int | None = None,
+) -> list[sqlite3.Row]:
     normalized_key = normalize_relationship_key(relationship_key)
     membership = get_active_family_membership(owner_user_id)
     if not membership:
         return []
 
-    rows = fetch_all(
-        """
-        SELECT
-            fr.*,
-            u.full_name AS relative_full_name,
-            u.email AS relative_email,
-            u.phone_number AS relative_phone_number
-        FROM family_relationships fr
-        JOIN users u ON u.id = fr.relative_user_id
-        WHERE fr.owner_user_id = ?
-          AND fr.family_group_id = ?
-          AND fr.is_active = 1
-          AND fr.relationship_key = ?
-        ORDER BY fr.priority_order ASC, fr.id ASC
-        LIMIT ?
-        """,
-        (owner_user_id, membership["family_group_id"], normalized_key, CALL_MAX_TARGETS),
-    )
+    if relative_user_id is not None:
+        rows = fetch_all(
+            """
+            SELECT
+                fr.*,
+                u.full_name AS relative_full_name,
+                u.email AS relative_email,
+                u.phone_number AS relative_phone_number
+            FROM family_relationships fr
+            JOIN users u ON u.id = fr.relative_user_id
+            WHERE fr.owner_user_id = ?
+              AND fr.family_group_id = ?
+              AND fr.is_active = 1
+              AND fr.relationship_key = ?
+              AND fr.relative_user_id = ?
+            ORDER BY fr.priority_order ASC, fr.id ASC
+            LIMIT 1
+            """,
+            (owner_user_id, membership["family_group_id"], normalized_key, relative_user_id),
+        )
+    else:
+        rows = fetch_all(
+            """
+            SELECT
+                fr.*,
+                u.full_name AS relative_full_name,
+                u.email AS relative_email,
+                u.phone_number AS relative_phone_number
+            FROM family_relationships fr
+            JOIN users u ON u.id = fr.relative_user_id
+            WHERE fr.owner_user_id = ?
+              AND fr.family_group_id = ?
+              AND fr.is_active = 1
+              AND fr.relationship_key = ?
+            ORDER BY fr.priority_order ASC, fr.id ASC
+            LIMIT ?
+            """,
+            (owner_user_id, membership["family_group_id"], normalized_key, CALL_MAX_TARGETS),
+        )
 
     return rows
 
@@ -2186,11 +2308,12 @@ def create_call_session_for_relationship(
     *,
     caller_user_id: int,
     relationship_key: str,
+    relative_user_id: int | None = None,
     transcript_text: str | None,
     trigger_source: str,
 ) -> sqlite3.Row | None:
     relationship_key = normalize_relationship_key(relationship_key)
-    targets = get_call_target_candidates(caller_user_id, relationship_key)
+    targets = get_call_target_candidates(caller_user_id, relationship_key, relative_user_id)
     if not targets:
         return None
 
@@ -2239,18 +2362,62 @@ def create_call_session_for_relationship(
     return advance_call_session_if_needed(call_session_id)
 
 
-def detect_call_intent(text: str, available_relationship_keys: list[str]) -> dict:
+def detect_call_intent(text: str, relationship_rows: list[sqlite3.Row]) -> dict:
     simplified = simplify_text(text)
     if not simplified:
         return {"type": "chat"}
 
-    if not any(keyword in simplified for keyword in ["goi", "lien lac", "call"]):
+    call_patterns = [
+        r"(^| )goi( |$)",
+        r"(^| )goi cho( |$)",
+        r"(^| )hay goi( |$)",
+        r"(^| )giup toi goi( |$)",
+        r"(^| )lien lac( |$)",
+        r"(^| )call( |$)",
+    ]
+    if "goi y" in simplified or not any(re.search(pattern, simplified) for pattern in call_patterns):
         return {"type": "chat"}
 
+    available_relationship_keys = sorted({row["relationship_key"] for row in relationship_rows})
+    person_alias_map = build_person_call_aliases(relationship_rows)
+    matched_people = []
+    for alias in sorted(person_alias_map.keys(), key=len, reverse=True):
+        if alias in simplified:
+            matched_people.extend(person_alias_map[alias])
+
+    unique_people: list[dict] = []
+    seen_people: set[tuple[str, int]] = set()
+    for entry in matched_people:
+        marker = (entry["relationship_key"], entry["relative_user_id"])
+        if marker in seen_people:
+            continue
+        seen_people.add(marker)
+        unique_people.append(entry)
+
+    if len(unique_people) == 1:
+        return {
+            "type": "call",
+            "relationship_key": unique_people[0]["relationship_key"],
+            "relative_user_id": unique_people[0]["relative_user_id"],
+            "confidence": 0.98,
+            "needs_confirmation": False,
+        }
+
+    if len(unique_people) > 1:
+        names = [entry["relative_full_name"] for entry in unique_people[:3]]
+        return {
+            "type": "call",
+            "relationship_key": None,
+            "confidence": 0.45,
+            "needs_confirmation": True,
+            "question": f"Bác muốn gọi {', '.join(names)} ạ?",
+        }
+
+    alias_map = build_relationship_call_aliases(relationship_rows)
     matched_keys = []
-    for alias, relationship_key in RELATIONSHIP_ALIASES.items():
-        if alias in simplified and (not available_relationship_keys or relationship_key in available_relationship_keys):
-            matched_keys.append(relationship_key)
+    for alias in sorted(alias_map.keys(), key=len, reverse=True):
+        if alias in simplified:
+            matched_keys.extend(sorted(alias_map[alias]))
 
     unique_keys = []
     for key in matched_keys:
