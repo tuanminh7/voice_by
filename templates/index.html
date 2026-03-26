@@ -3,9 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Trợ lý sức khỏe</title>
+  <title>UT Nguyen</title>
   <meta name="theme-color" content="#0f4c81">
-  <meta name="description" content="Trợ lý sức khỏe với đăng nhập bền vững, PIN 4 số và quản lý gia đình.">
+  <meta
+    name="description"
+    content="Website UT Nguyen chi dung de tai ung dung. Moi tinh nang dang nhap, tro ly va cuoc goi se duoc dung hoan toan trong app."
+  >
   <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
@@ -15,293 +18,75 @@
       <div class="hero-brand">
         <span class="hero-mark" aria-hidden="true">+</span>
         <div>
-          <p class="eyebrow">Ứng dụng đồng hành</p>
-          <h1>Trợ lý sức khỏe</h1>
+          <p class="eyebrow">UT Nguyen</p>
+          <h1>Tai app de su dung</h1>
         </div>
       </div>
-      <p class="model-chip">Model: {{ model_name }}</p>
+      <p class="model-chip">App-only</p>
     </header>
 
     <main class="page-stage">
       <section id="messageBanner" class="message-banner hidden" aria-live="polite"></section>
 
-      <section id="authView" class="panel auth-panel hidden">
-        <div class="panel-copy">
-          <p class="eyebrow">Nâng cấp v1</p>
-          <h2>Đăng nhập bền vững cho người lớn tuổi</h2>
+      <section class="panel download-landing">
+        <div class="download-hero-copy">
+          <p class="eyebrow">Ban chinh thuc</p>
+          <h2>Moi thao tac se dien ra hoan toan trong app</h2>
           <p>
-            Đăng ký một lần, những lần sau chỉ cần mở app và nhập PIN 4 số trên đúng thiết bị đang dùng.
+            Website nay chi con 1 chuc nang duy nhat: giup thiet bi truy cap vao de tai ung dung. Cac luong dang nhap,
+            mo khoa, tro ly AI, goi khan cap va nhan cuoc goi se duoc su dung hoan toan trong app.
+          </p>
+          <p class="helper-text">
+            Chon dung nen tang cua ban roi cai dat de tiep tuc.
           </p>
         </div>
 
-        <div class="auth-switch" role="tablist" aria-label="Chọn biểu mẫu">
-          <button class="tab-toggle is-active" data-auth-tab="login" type="button">Đăng nhập</button>
-          <button class="tab-toggle" data-auth-tab="register" type="button">Đăng ký</button>
-          <button class="tab-toggle" data-auth-tab="forgot" type="button">Quên mật khẩu</button>
-          <button class="tab-toggle" data-auth-tab="reset" type="button">Đặt lại</button>
-        </div>
-
-        <div class="auth-grid">
-          <form id="loginForm" class="card form-card" data-auth-panel="login">
-            <h3>Đăng nhập</h3>
-            <label>Email hoặc số điện thoại
-              <input id="loginIdentifier" name="identifier" type="text" autocomplete="username" required>
-            </label>
-            <label>Mật khẩu
-              <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
-            </label>
-            <button type="submit" class="primary-btn">Vào app</button>
-          </form>
-
-          <form id="registerForm" class="card form-card hidden" data-auth-panel="register">
-            <h3>Tạo tài khoản</h3>
-            <label>Họ tên
-              <input id="registerFullName" name="full_name" type="text" autocomplete="name" required>
-            </label>
-            <label>Tuổi
-              <input id="registerAge" name="age" type="number" min="1" max="120" required>
-            </label>
-            <label>Email
-              <input id="registerEmail" name="email" type="email" autocomplete="email" required>
-            </label>
-            <label>Số điện thoại
-              <input id="registerPhone" name="phone_number" type="tel" autocomplete="tel" required>
-            </label>
-            <label>Mật khẩu
-              <input id="registerPassword" name="password" type="password" autocomplete="new-password" required>
-            </label>
-            <button type="submit" class="primary-btn">Tạo tài khoản</button>
-          </form>
-
-          <form id="forgotForm" class="card form-card hidden" data-auth-panel="forgot">
-            <h3>Quên mật khẩu</h3>
-            <label>Email đã đăng ký
-              <input id="forgotEmail" name="email" type="email" autocomplete="email" required>
-            </label>
-            <button type="submit" class="primary-btn">Tạo mã đặt lại</button>
-            <p class="helper-text">Trong bản local, app sẽ hiện luôn mã reset để bạn thử nhanh.</p>
-          </form>
-
-          <form id="resetForm" class="card form-card hidden" data-auth-panel="reset">
-            <h3>Đặt lại mật khẩu</h3>
-            <label>Mã đặt lại
-              <input id="resetToken" name="token" type="text" required>
-            </label>
-            <label>Mật khẩu mới
-              <input id="resetPassword" name="new_password" type="password" autocomplete="new-password" required>
-            </label>
-            <button type="submit" class="primary-btn">Cập nhật mật khẩu</button>
-          </form>
-        </div>
-      </section>
-
-      <section id="pinSetupView" class="panel pin-panel hidden">
-        <div class="panel-copy">
-          <p class="eyebrow">PIN thiết bị</p>
-          <h2>Tạo PIN 4 số</h2>
-          <p>PIN này chỉ dùng để mở nhanh trên thiết bị hiện tại. Nếu đổi máy hoặc đăng xuất, bạn vẫn cần mật khẩu.</p>
-        </div>
-        <form id="pinSetupForm" class="card pin-card">
-          <label>PIN 4 số
-            <input id="pinSetupValue" name="pin" type="password" inputmode="numeric" pattern="\d{4}" maxlength="4" required>
-          </label>
-          <label>Nhập lại PIN
-            <input id="pinSetupConfirm" name="confirm_pin" type="password" inputmode="numeric" pattern="\d{4}" maxlength="4" required>
-          </label>
-          <button type="submit" class="primary-btn">Lưu PIN</button>
-        </form>
-      </section>
-
-      <section id="pinUnlockView" class="panel pin-panel hidden">
-        <div class="panel-copy">
-          <p class="eyebrow">Mở khóa nhanh</p>
-          <h2>Nhập PIN để vào app</h2>
-          <p id="pinUnlockName">Thiết bị này đã ghi nhớ đăng nhập.</p>
-        </div>
-        <form id="pinUnlockForm" class="card pin-card">
-          <label>PIN 4 số
-            <input id="pinUnlockValue" name="pin" type="password" inputmode="numeric" pattern="\d{4}" maxlength="4" required>
-          </label>
-          <button type="submit" class="primary-btn">Mở khóa</button>
-        </form>
-      </section>
-
-      <section id="appView" class="app-view hidden">
-        <div class="panel topbar-panel">
-          <div>
-            <p class="eyebrow">Xin chào</p>
-            <h2 id="welcomeName">Người dùng</h2>
-          </div>
-          <div class="topbar-actions">
-            <button id="installAppBtn" type="button" class="ghost-btn">Cài app</button>
-            <button id="logoutBtn" type="button" class="danger-btn">Đăng xuất</button>
+        <div class="download-hero-card">
+          <div class="download-badge">Tai ung dung</div>
+          <h3>Chon thiet bi cua ban</h3>
+          <p>App duoc cai truc tiep tu trinh duyet tren Android va desktop neu trinh duyet ho tro.</p>
+          <div class="download-actions">
+            <button id="installAndroidBtn" type="button" class="primary-btn">Cai app tren Android</button>
+            <button id="openDownloadModalBtn" type="button" class="ghost-btn">Huong dan cho desktop</button>
           </div>
         </div>
-
-        <nav class="section-tabs" aria-label="Chọn khu vực chức năng">
-          <button class="section-tab is-active" data-section="chat" type="button">Trợ lý</button>
-          <button class="section-tab" data-section="family" type="button">Gia đình</button>
-          <button class="section-tab" data-section="account" type="button">Cài đặt</button>
-        </nav>
-
-        <section id="chatSection" class="section-panel">
-          <div class="assistant-card panel">
-            <div class="avatar-frame" id="avatarFrame" aria-live="polite">
-              <div class="avatar-ring"></div>
-              <div class="avatar-ring avatar-ring-secondary"></div>
-              <img
-                class="avatar-image"
-                src="{{ url_for('static', filename='images/anh1.png') }}"
-                alt="Ảnh đại diện AI"
-              >
-            </div>
-            <p class="assistant-caption">Trợ lý đang ở đây để lắng nghe và trả lời thật rõ ràng.</p>
-            <p id="statusText" class="status-pill">Sẵn sàng trò chuyện.</p>
-          </div>
-
-          <div class="panel chat-panel">
-            <div class="section-head">
-              <h3>Khung hội thoại</h3>
-              <button id="clearSpeechBtn" type="button" class="ghost-btn">Dừng đọc</button>
-            </div>
-            <div id="chatLog" class="chat-log" aria-live="polite"></div>
-            <form id="chatForm" class="composer">
-              <label class="sr-only" for="messageInput">Nhập câu hỏi</label>
-              <textarea id="messageInput" rows="3" placeholder="Ví dụ: Hôm nay tôi nên ăn gì để dễ tiêu?" required></textarea>
-              <div class="composer-actions">
-                <button id="voiceBtn" type="button" class="voice-btn" aria-label="Nói với trợ lý">Nói</button>
-                <button id="sendBtn" type="submit" class="primary-btn">Gửi</button>
-              </div>
-            </form>
-          </div>
-        </section>
-
-        <section id="familySection" class="section-panel hidden">
-          <div class="panel stack-panel">
-            <div class="section-head">
-              <h3>Nhóm gia đình</h3>
-              <p id="familySummaryText" class="muted-text">Bạn chưa tham gia nhóm gia đình nào.</p>
-            </div>
-
-            <form id="createFamilyForm" class="card form-card compact-card">
-              <h4>Tạo nhóm gia đình</h4>
-              <label>Tên nhóm
-                <input id="familyNameInput" name="family_name" type="text" required>
-              </label>
-              <button type="submit" class="primary-btn">Tạo nhóm</button>
-            </form>
-
-            <form id="renameFamilyForm" class="card form-card compact-card hidden">
-              <h4>Đổi tên nhóm</h4>
-              <label>Tên nhóm mới
-                <input id="renameFamilyInput" name="family_name" type="text">
-              </label>
-              <button type="submit" class="ghost-btn">Lưu tên mới</button>
-            </form>
-
-            <form id="inviteFamilyForm" class="card form-card compact-card hidden">
-              <h4>Mời thành viên</h4>
-              <label>Email hoặc số điện thoại
-                <input id="inviteIdentifier" name="identifier" type="text">
-              </label>
-              <button type="submit" class="primary-btn">Gửi lời mời</button>
-            </form>
-
-            <form id="callRelationshipForm" class="card form-card compact-card hidden">
-              <h4>Cấu hình người nhận cuộc gọi</h4>
-              <label>Thành viên cần gọi
-                <select id="callRelativeUserId" name="relative_user_id" required></select>
-              </label>
-              <label>Vai trò trong gia đình
-                <select id="callRelationshipKey" name="relationship_key" required></select>
-              </label>
-              <label>Biệt danh hoặc cách gọi
-                <input id="callCustomAliases" name="custom_aliases" type="text" placeholder="Ví dụ: Minh, anh Hai, chú Út">
-              </label>
-              <label>Thứ tự ưu tiên
-                <input id="callPriorityOrder" name="priority_order" type="number" min="1" value="1" required>
-              </label>
-              <p class="helper-text">Mỗi biệt danh cách nhau bằng dấu phẩy. Bạn có thể nói như "gọi con trai", "gọi Minh", "gọi chú Út".</p>
-              <div class="form-actions">
-                <button id="saveCallRelationshipBtn" type="submit" class="primary-btn">Lưu cấu hình gọi</button>
-                <button id="resetCallRelationshipBtn" type="button" class="ghost-btn">Làm mới</button>
-              </div>
-            </form>
-
-            <div class="card list-card">
-              <h4>Thành viên hiện tại</h4>
-              <div id="familyMembersList" class="list-stack empty-state">Chưa có dữ liệu thành viên.</div>
-            </div>
-
-            <div class="card list-card">
-              <div class="section-head">
-                <div>
-                  <h4>Cấu hình gọi hiện tại</h4>
-                  <p class="muted-text">Danh sách này quyết định AI sẽ gọi ai khi bạn ra lệnh bằng giọng nói.</p>
-                </div>
-                <button id="refreshFamilyBtn" type="button" class="ghost-btn">Làm mới</button>
-              </div>
-              <div id="callRelationshipsList" class="list-stack empty-state">Bạn chưa cấu hình người nhận cuộc gọi nào.</div>
-            </div>
-
-            <div class="card list-card">
-              <h4>Lời mời đang chờ bạn</h4>
-              <div id="familyInvitationsList" class="list-stack empty-state">Bạn chưa có lời mời nào.</div>
-            </div>
-          </div>
-        </section>
-
-        <section id="accountSection" class="section-panel hidden">
-          <div class="panel account-grid">
-            <div class="card list-card settings-card">
-              <h3>Thông tin hiện tại</h3>
-              <div id="settingsUserSummary" class="list-stack empty-state">Chưa có dữ liệu người dùng.</div>
-            </div>
-
-            <form id="profileForm" class="card form-card">
-              <h3>Hồ sơ cá nhân</h3>
-              <label>Họ tên
-                <input id="profileFullName" name="full_name" type="text" required>
-              </label>
-              <label>Tuổi
-                <input id="profileAge" name="age" type="number" min="1" max="120" required>
-              </label>
-              <label>Email
-                <input id="profileEmail" name="email" type="email" required>
-              </label>
-              <label>Số điện thoại
-                <input id="profilePhone" name="phone_number" type="tel" required>
-              </label>
-              <button type="submit" class="primary-btn">Lưu hồ sơ</button>
-            </form>
-
-            <form id="geminiKeyForm" class="card form-card">
-              <h3>Cấu hình trợ lý AI</h3>
-              <p id="geminiKeyStatus" class="muted-text">Bạn chưa thêm Gemini API key cá nhân.</p>
-              <label>Gemini API key
-                <input id="geminiApiKey" name="api_key" type="password" autocomplete="off" placeholder="Dán Gemini API key của riêng bạn">
-              </label>
-              <p class="helper-text">Muốn voice với chatbot thì hãy lấy Gemini API key của chính bạn rồi dán vào đây để tránh dùng chung và đỡ bị limit.</p>
-              <div class="form-actions">
-                <button type="submit" class="primary-btn">Lưu API key</button>
-                <button id="clearGeminiKeyBtn" type="button" class="ghost-btn">Xóa API key</button>
-              </div>
-            </form>
-
-            <form id="changePasswordForm" class="card form-card">
-              <h3>Đổi mật khẩu</h3>
-              <label>Mật khẩu mới
-                <input id="changePasswordValue" name="new_password" type="password" autocomplete="new-password" required>
-              </label>
-              <label>Nhập lại mật khẩu mới
-                <input id="changePasswordConfirm" name="confirm_password" type="password" autocomplete="new-password" required>
-              </label>
-              <button type="submit" class="primary-btn">Đổi mật khẩu</button>
-            </form>
-          </div>
-        </section>
       </section>
     </main>
+  </div>
+
+  <div id="downloadModal" class="download-modal hidden" role="dialog" aria-modal="true" aria-labelledby="downloadModalTitle">
+    <div class="download-modal-backdrop" data-close-download-modal></div>
+    <div class="download-modal-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Tai ung dung</p>
+          <h3 id="downloadModalTitle">Chon nen tang</h3>
+        </div>
+        <button id="closeDownloadModalBtn" type="button" class="ghost-btn">Dong</button>
+      </div>
+
+      <div class="download-grid">
+        <button
+          id="modalInstallAndroidBtn"
+          type="button"
+          class="download-option download-option-button"
+          data-download-link="android-browser"
+        >
+          <strong>Android</strong>
+          <span>Cai truc tiep tu Chrome/Android bang popup cai dat hoac Add to Home Screen.</span>
+        </button>
+
+        <article class="download-option">
+          <strong>Laptop / Desktop</strong>
+          <span>Mo website bang Chrome hoac Edge, sau do chon Install app / Apps / Create shortcut tuy theo trinh duyet.</span>
+        </article>
+      </div>
+
+      <p class="helper-text">
+        Neu chua thay popup cai dat, hay mo menu trinh duyet va chon Add to Home Screen, Install app, Apps hoac
+        Create shortcut tuy thiet bi.
+      </p>
+    </div>
   </div>
 
   <script src="{{ url_for('static', filename='script.js') }}"></script>

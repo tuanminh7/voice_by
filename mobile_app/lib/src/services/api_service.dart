@@ -35,6 +35,10 @@ class ApiService {
         receiveTimeout: const Duration(seconds: 15),
         headers: {
           HttpHeaders.contentTypeHeader: 'application/json',
+          HttpHeaders.userAgentHeader:
+              'ut-nguyen-mobile/1.0 (flutter; ${Platform.operatingSystem})',
+          'X-Client-Source': 'flutter-mobile',
+          'X-Client-Platform': Platform.operatingSystem,
         },
       ),
     );

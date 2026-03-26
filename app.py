@@ -43,7 +43,7 @@ PIN_LOCK_MINUTES = 5
 PIN_MAX_ATTEMPTS = 5
 RESET_TOKEN_MINUTES = 30
 CALL_PROVIDER = (os.getenv("CALL_PROVIDER", "zegocloud") or "zegocloud").strip().lower()
-CALL_RING_TIMEOUT_SECONDS = int(os.getenv("CALL_RING_TIMEOUT_SECONDS", "25"))
+CALL_RING_TIMEOUT_SECONDS = int(os.getenv("CALL_RING_TIMEOUT_SECONDS", "30"))
 CALL_MAX_TARGETS = int(os.getenv("CALL_MAX_TARGETS", "3"))
 FIREBASE_SERVICE_ACCOUNT_JSON = (os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "") or "").strip()
 
@@ -102,6 +102,21 @@ def close_db(_exception=None) -> None:
     connection = g.pop("db", None)
     if connection is not None:
         connection.close()
+
+
+@app.before_request
+def log_native_client_request() -> None:
+    client_source = (request.headers.get("X-Client-Source", "") or "").strip()
+    if not client_source or not request.path.startswith("/api/"):
+        return
+
+    app.logger.info(
+        "API request tu client=%s platform=%s path=%s method=%s",
+        client_source,
+        (request.headers.get("X-Client-Platform", "") or "").strip(),
+        request.path,
+        request.method,
+    )
 
 
 def init_db() -> None:

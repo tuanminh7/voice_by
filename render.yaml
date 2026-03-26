@@ -15,6 +15,6 @@ services:
       - key: CALL_PROVIDER
         value: zegocloud
       - key: CALL_RING_TIMEOUT_SECONDS
-        value: "25"
+        value: "30"
       - key: CALL_MAX_TARGETS
         value: "3"
