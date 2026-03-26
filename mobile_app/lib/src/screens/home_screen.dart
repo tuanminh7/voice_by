@@ -134,6 +134,7 @@ class _HomeScreenState extends State<HomeScreen> {
               family: family,
               realtimeConfigured: controller.hasRealtimeCallConfig,
               pushConfigured: controller.hasPushMessagingConfig,
+              pushStatusMessage: controller.pushStatusMessage,
             ),
             const SizedBox(height: 20),
             _InvitationCard(
@@ -203,6 +204,7 @@ class _HomeScreenState extends State<HomeScreen> {
               busy: controller.busy,
               autoPushToken: controller.autoPushToken,
               pushConfigured: controller.hasPushMessagingConfig,
+              pushStatusMessage: controller.pushStatusMessage,
               onSubmit: () => context.read<AppController>().registerPushToken(
                     platform: 'android',
                     pushToken: _pushToken.text.trim(),
@@ -242,11 +244,13 @@ class _FamilyCard extends StatelessWidget {
     required this.family,
     required this.realtimeConfigured,
     required this.pushConfigured,
+    required this.pushStatusMessage,
   });
 
   final FamilyGroup? family;
   final bool realtimeConfigured;
   final bool pushConfigured;
+  final String? pushStatusMessage;
 
   @override
   Widget build(BuildContext context) {
@@ -279,6 +283,10 @@ class _FamilyCard extends StatelessWidget {
                     ? 'Firebase Messaging da duoc mo, app se tu lay token neu project Firebase da cau hinh.'
                     : 'Firebase Messaging chua san sang, hien van co the test bang token nhap tay.',
               ),
+              if (pushStatusMessage?.isNotEmpty == true) ...[
+                const SizedBox(height: 4),
+                Text(pushStatusMessage!),
+              ],
               const SizedBox(height: 12),
               ...family!.members.map(
                 (member) => ListTile(
@@ -637,6 +645,7 @@ class _PushTokenCard extends StatelessWidget {
     required this.busy,
     required this.autoPushToken,
     required this.pushConfigured,
+    required this.pushStatusMessage,
   });
 
   final TextEditingController controller;
@@ -644,6 +653,7 @@ class _PushTokenCard extends StatelessWidget {
   final bool busy;
   final String? autoPushToken;
   final bool pushConfigured;
+  final String? pushStatusMessage;
 
   @override
   Widget build(BuildContext context) {
@@ -660,6 +670,10 @@ class _PushTokenCard extends StatelessWidget {
                   ? 'App dang co san luong lay token tu dong. Neu Firebase chua cau hinh xong, ban van co the nhap tay token de test.'
                   : 'Firebase chua cau hinh xong, tam thoi nhap tay token de test backend nhanh.',
             ),
+            if (pushStatusMessage?.isNotEmpty == true) ...[
+              const SizedBox(height: 8),
+              Text(pushStatusMessage!),
+            ],
             if (autoPushToken?.isNotEmpty == true) ...[
               const SizedBox(height: 8),
               Text('Auto token: $autoPushToken'),

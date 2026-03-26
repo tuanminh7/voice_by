@@ -46,11 +46,14 @@ class AppController extends ChangeNotifier {
   String? errorMessage;
   bool busy = false;
   Timer? _callPollTimer;
+  Timer? _incomingCallWatchTimer;
   StreamSubscription<CallPushMessage>? _pushSubscription;
+  bool _incomingCallWatchBusy = false;
 
   bool get hasRealtimeCallConfig => _callService.isConfigured;
   bool get hasPushMessagingConfig => _messagingService.isAvailable;
   String? get autoPushToken => _messagingService.deviceToken;
+  String? get pushStatusMessage => _messagingService.availabilityMessage;
 
   static Future<AppController> create() async {
     final store = await LocalStore.create();
@@ -308,6 +311,7 @@ class AppController extends ChangeNotifier {
       await _apiService.logout();
       await _callService.uninitialize();
       _stopPollingCall();
+      _stopIncomingCallWatcher();
       activeCall = null;
       profile = null;
       family = null;
@@ -346,6 +350,45 @@ class AppController extends ChangeNotifier {
   void _stopPollingCall() {
     _callPollTimer?.cancel();
     _callPollTimer = null;
+  }
+
+  void _startIncomingCallWatcher() {
+    if (_incomingCallWatchTimer != null) {
+      return;
+    }
+
+    _incomingCallWatchTimer = Timer.periodic(
+      const Duration(seconds: AppConfig.callPollIntervalSeconds),
+      (_) async {
+        await _refreshIncomingCalls();
+      },
+    );
+  }
+
+  void _stopIncomingCallWatcher() {
+    _incomingCallWatchTimer?.cancel();
+    _incomingCallWatchTimer = null;
+  }
+
+  Future<void> _refreshIncomingCalls() async {
+    if (_incomingCallWatchBusy || stage != AppStage.home) {
+      return;
+    }
+    if (activeCall != null && !_isCallFinished(activeCall)) {
+      return;
+    }
+
+    _incomingCallWatchBusy = true;
+    try {
+      callHistory = await _apiService.getCallHistory();
+      _syncActiveCallFromHistory();
+      await _maybeJoinAcceptedCall(activeCall);
+      notifyListeners();
+    } catch (_) {
+      // Keep watcher running; next tick can recover automatically.
+    } finally {
+      _incomingCallWatchBusy = false;
+    }
   }
 
   void _listenToPushMessages() {
@@ -479,10 +522,16 @@ class AppController extends ChangeNotifier {
 
     activeCall = resolvedCall;
     if (activeCall != null && !_isCallFinished(activeCall)) {
+      _stopIncomingCallWatcher();
       _startPollingCall();
     } else {
       _stopPollingCall();
       _callService.clearActiveCall();
+      if (stage == AppStage.home) {
+        _startIncomingCallWatcher();
+      } else {
+        _stopIncomingCallWatcher();
+      }
     }
   }
 
@@ -502,6 +551,7 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _stopPollingCall();
+    _stopIncomingCallWatcher();
     _pushSubscription?.cancel();
     _callService.uninitialize();
     _messagingService.dispose();

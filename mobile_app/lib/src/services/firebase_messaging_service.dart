@@ -40,10 +40,12 @@ class FirebaseMessagingService {
   bool _available = false;
   String? _deviceToken;
   CallPushMessage? _launchMessage;
+  String? _availabilityMessage;
 
   bool get isAvailable => _available;
   String? get deviceToken => _deviceToken;
   CallPushMessage? get launchMessage => _launchMessage;
+  String? get availabilityMessage => _availabilityMessage;
   Stream<CallPushMessage> get callMessages => _callMessageController.stream;
 
   Future<void> initialize() async {
@@ -55,6 +57,7 @@ class FirebaseMessagingService {
     try {
       await Firebase.initializeApp();
       _available = true;
+      _availabilityMessage = 'Firebase Messaging da san sang.';
       FirebaseMessaging.onBackgroundMessage(
         firebaseMessagingBackgroundHandler,
       );
@@ -73,9 +76,12 @@ class FirebaseMessagingService {
       _tokenRefreshSubscription =
           FirebaseMessaging.instance.onTokenRefresh.listen((token) {
         _deviceToken = token;
+        _availabilityMessage = 'Da nhan duoc FCM token tu dong.';
       });
-    } catch (_) {
+    } catch (error) {
       _available = false;
+      _availabilityMessage =
+          'Firebase chua duoc cau hinh native tren app nay. Can them google-services.json hoac GoogleService-Info.plist. Chi tiet: $error';
     }
   }
 
@@ -103,8 +109,12 @@ class FirebaseMessagingService {
       );
 
       _deviceToken ??= await messaging.getToken();
+      _availabilityMessage = _deviceToken?.isNotEmpty == true
+          ? 'Da lay duoc FCM token tu dong.'
+          : 'Firebase da khoi tao nhung chua lay duoc FCM token.';
       return _deviceToken;
-    } catch (_) {
+    } catch (error) {
+      _availabilityMessage = 'Khong lay duoc FCM token: $error';
       return null;
     }
   }

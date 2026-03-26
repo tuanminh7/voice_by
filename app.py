@@ -67,6 +67,7 @@ knowledge_chunks = [line.strip() for line in knowledge.splitlines() if line.stri
 chat_store = defaultdict(list)
 pin_serializer = URLSafeTimedSerializer(app.config["SECRET_KEY"], salt="device-pin-token")
 firebase_push_app = None
+firebase_push_init_attempted = False
 
 
 def utcnow() -> datetime:
@@ -288,14 +289,20 @@ def json_error(message: str, status: int, code: str | None = None):
 
 
 def get_firebase_push_app():
-    global firebase_push_app
+    global firebase_push_app, firebase_push_init_attempted
 
     if firebase_push_app is not None:
         return firebase_push_app
+    if firebase_push_init_attempted:
+        return None
+
+    firebase_push_init_attempted = True
 
     if firebase_admin is None or firebase_credentials is None or firebase_messaging is None:
+        app.logger.warning("Firebase Admin SDK chưa sẵn sàng, push notification sẽ bị tắt.")
         return None
     if not FIREBASE_SERVICE_ACCOUNT_JSON:
+        app.logger.warning("Thiếu FIREBASE_SERVICE_ACCOUNT_JSON, push notification sẽ bị tắt.")
         return None
 
     try:
@@ -303,6 +310,7 @@ def get_firebase_push_app():
         credential = firebase_credentials.Certificate(service_account_info)
         firebase_push_app = firebase_admin.initialize_app(credential, name="push-app")
     except Exception:
+        app.logger.exception("Khoi tao Firebase push app that bai.")
         firebase_push_app = None
 
     return firebase_push_app
@@ -2206,6 +2214,7 @@ def send_push_notification(
 ) -> None:
     firebase_app = get_firebase_push_app()
     if firebase_app is None or firebase_messaging is None:
+        app.logger.info("Bo qua gui push vi Firebase push app chua san sang.")
         return
 
     tokens = [token for token in (push_tokens or list_push_tokens_for_user(target_user_id or 0)) if token]
@@ -2215,6 +2224,7 @@ def send_push_notification(
             unique_tokens.append(token)
 
     if not unique_tokens:
+        app.logger.info("Khong tim thay push token dang hoat dong cho user_id=%s.", target_user_id)
         return
 
     payload_data = {
@@ -2246,8 +2256,26 @@ def send_push_notification(
     )
 
     try:
-        firebase_messaging.send_each_for_multicast(message, app=firebase_app)
+        result = firebase_messaging.send_each_for_multicast(message, app=firebase_app)
+        if result.failure_count:
+            failed_tokens = []
+            for index, response in enumerate(result.responses):
+                if response.success:
+                    continue
+                failed_tokens.append(
+                    {
+                        "token_suffix": unique_tokens[index][-12:] if len(unique_tokens[index]) > 12 else unique_tokens[index],
+                        "error": str(response.exception),
+                    }
+                )
+            app.logger.warning(
+                "Gui FCM xong nhung co loi: success=%s failure=%s details=%s",
+                result.success_count,
+                result.failure_count,
+                failed_tokens,
+            )
     except Exception:
+        app.logger.exception("Gui push notification that bai cho user_id=%s.", target_user_id)
         return
 
 
