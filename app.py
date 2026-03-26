@@ -21,6 +21,15 @@ try:
 except ImportError:  # pragma: no cover - handled at runtime
     genai = None
 
+try:
+    import firebase_admin
+    from firebase_admin import credentials as firebase_credentials
+    from firebase_admin import messaging as firebase_messaging
+except ImportError:  # pragma: no cover - handled at runtime
+    firebase_admin = None
+    firebase_credentials = None
+    firebase_messaging = None
+
 
 load_dotenv()
 
@@ -36,6 +45,7 @@ RESET_TOKEN_MINUTES = 30
 CALL_PROVIDER = (os.getenv("CALL_PROVIDER", "zegocloud") or "zegocloud").strip().lower()
 CALL_RING_TIMEOUT_SECONDS = int(os.getenv("CALL_RING_TIMEOUT_SECONDS", "25"))
 CALL_MAX_TARGETS = int(os.getenv("CALL_MAX_TARGETS", "3"))
+FIREBASE_SERVICE_ACCOUNT_JSON = (os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "") or "").strip()
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
@@ -56,6 +66,7 @@ knowledge = KNOWLEDGE_PATH.read_text(encoding="utf-8") if KNOWLEDGE_PATH.exists(
 knowledge_chunks = [line.strip() for line in knowledge.splitlines() if line.strip()]
 chat_store = defaultdict(list)
 pin_serializer = URLSafeTimedSerializer(app.config["SECRET_KEY"], salt="device-pin-token")
+firebase_push_app = None
 
 
 def utcnow() -> datetime:
@@ -101,6 +112,7 @@ def init_db() -> None:
         email TEXT NOT NULL UNIQUE,
         phone_number TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL,
+        gemini_api_key TEXT NOT NULL DEFAULT '',
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -252,6 +264,13 @@ def init_db() -> None:
 
     db = get_db()
     db.executescript(schema)
+    user_columns = {
+        row["name"]
+        for row in db.execute("PRAGMA table_info(users)").fetchall()
+    }
+    if "gemini_api_key" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN gemini_api_key TEXT NOT NULL DEFAULT ''")
+
     relationship_columns = {
         row["name"]
         for row in db.execute("PRAGMA table_info(family_relationships)").fetchall()
@@ -266,6 +285,27 @@ def json_error(message: str, status: int, code: str | None = None):
     if code:
         payload["code"] = code
     return jsonify(payload), status
+
+
+def get_firebase_push_app():
+    global firebase_push_app
+
+    if firebase_push_app is not None:
+        return firebase_push_app
+
+    if firebase_admin is None or firebase_credentials is None or firebase_messaging is None:
+        return None
+    if not FIREBASE_SERVICE_ACCOUNT_JSON:
+        return None
+
+    try:
+        service_account_info = json.loads(FIREBASE_SERVICE_ACCOUNT_JSON)
+        credential = firebase_credentials.Certificate(service_account_info)
+        firebase_push_app = firebase_admin.initialize_app(credential, name="push-app")
+    except Exception:
+        firebase_push_app = None
+
+    return firebase_push_app
 
 
 def normalize_email(value: str) -> str:
@@ -632,6 +672,36 @@ def change_password():
     return jsonify({"message": "Đổi mật khẩu thành công."})
 
 
+@app.route("/api/me/gemini-key", methods=["POST"])
+@pin_required
+def update_gemini_key():
+    payload = require_json()
+    api_key = (payload.get("api_key") or "").strip()
+
+    if not api_key:
+        return json_error("Bạn cần nhập Gemini API key trước khi lưu.", 400, "missing_gemini_api_key")
+
+    get_db().execute(
+        "UPDATE users SET gemini_api_key = ?, updated_at = ? WHERE id = ?",
+        (api_key, utcnow_iso(), g.current_user["id"]),
+    )
+    get_db().commit()
+    g.current_user = fetch_user_by_id(g.current_user["id"])
+    return jsonify({"message": "Đã lưu Gemini API key cá nhân.", "user": serialize_user(g.current_user)})
+
+
+@app.route("/api/me/gemini-key", methods=["DELETE"])
+@pin_required
+def clear_gemini_key():
+    get_db().execute(
+        "UPDATE users SET gemini_api_key = '', updated_at = ? WHERE id = ?",
+        (utcnow_iso(), g.current_user["id"]),
+    )
+    get_db().commit()
+    g.current_user = fetch_user_by_id(g.current_user["id"])
+    return jsonify({"message": "Đã xóa Gemini API key cá nhân.", "user": serialize_user(g.current_user)})
+
+
 @app.route("/api/families/current", methods=["GET"])
 @pin_required
 def current_family():
@@ -743,6 +813,23 @@ def invite_to_family():
         (membership["family_group_id"], invited_user["id"], g.current_user["id"], now),
     )
     get_db().commit()
+    invitation_id = fetch_one(
+        "SELECT id FROM family_invitations WHERE family_group_id = ? AND invited_user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+        (membership["family_group_id"], invited_user["id"]),
+    )["id"]
+
+    send_push_notification(
+        target_user_id=invited_user["id"],
+        title="Loi moi gia dinh moi",
+        body=f"{g.current_user['full_name']} vua moi ban vao nhom {membership['family_name']}.",
+        data={
+            "event_type": "family_invitation",
+            "invitation_id": invitation_id,
+            "family_group_id": membership["family_group_id"],
+            "family_name": membership["family_name"],
+            "invited_by_user_id": g.current_user["id"],
+        },
+    )
 
     return jsonify({"message": f"Đã gửi lời mời cho {invited_user['full_name']}."})
 
@@ -792,6 +879,17 @@ def respond_family_invitation(invitation_id: int):
             (now, invitation_id),
         )
         db.commit()
+        send_push_notification(
+            target_user_id=invitation["invited_by_user_id"],
+            title="Loi moi da duoc chap nhan",
+            body=f"{g.current_user['full_name']} da tham gia nhom gia dinh cua ban.",
+            data={
+                "event_type": "family_invitation_accepted",
+                "invitation_id": invitation_id,
+                "family_group_id": invitation["family_group_id"],
+                "user_id": g.current_user["id"],
+            },
+        )
         return jsonify({"message": "Bạn đã tham gia nhóm gia đình.", "family": build_family_payload(g.current_user["id"])})
 
     get_db().execute(
@@ -799,6 +897,17 @@ def respond_family_invitation(invitation_id: int):
         (utcnow_iso(), invitation_id),
     )
     get_db().commit()
+    send_push_notification(
+        target_user_id=invitation["invited_by_user_id"],
+        title="Loi moi da bi tu choi",
+        body=f"{g.current_user['full_name']} da tu choi loi moi vao nhom gia dinh.",
+        data={
+            "event_type": "family_invitation_declined",
+            "invitation_id": invitation_id,
+            "family_group_id": invitation["family_group_id"],
+            "user_id": g.current_user["id"],
+        },
+    )
     return jsonify({"message": "Bạn đã từ chối lời mời."})
 
 
@@ -1236,8 +1345,9 @@ def chat_stream():
 
     @stream_with_context
     def generate():
-        if model is None:
-            reply = build_unavailable_message()
+        current_model = get_user_model(g.current_user)
+        if current_model is None:
+            reply = build_unavailable_message(g.current_user)
             remember_turn(history, user_text, reply)
             yield reply
             return
@@ -1246,7 +1356,7 @@ def chat_stream():
         full_text = ""
 
         try:
-            response = model.generate_content(prompt, stream=True)
+            response = current_model.generate_content(prompt, stream=True)
             for chunk in response:
                 chunk_text = getattr(chunk, "text", "")
                 if not chunk_text:
@@ -1344,11 +1454,28 @@ def get_history() -> list[str]:
     return chat_store[get_chat_history_key()]
 
 
-def build_unavailable_message() -> str:
+def get_user_model(user_row: sqlite3.Row | None):
+    if genai is None:
+        return None
+
+    personal_key = get_personal_gemini_api_key(user_row)
+    if not personal_key:
+        return None
+
+    genai.configure(api_key=personal_key)
+    return genai.GenerativeModel(MODEL_NAME)
+
+
+def build_unavailable_message(user_row: sqlite3.Row | None = None) -> str:
     if genai is None:
         return (
             "Dạ, ứng dụng chưa cài thư viện google-generativeai nên tôi chưa thể kết nối Gemini. "
             "Bạn hãy cài dependencies rồi thử lại nhé."
+        )
+
+    if user_row is not None and not get_personal_gemini_api_key(user_row):
+        return (
+            "Dạ, để trò chuyện hoặc voice với trợ lý, bác hãy mở phần Cài đặt và thêm Gemini API key cá nhân trước nhé."
         )
 
     if not API_KEY:
@@ -1361,13 +1488,14 @@ def build_unavailable_message() -> str:
 
 
 def generate_reply(question: str, history: list[str]) -> str:
-    if model is None:
-        reply = build_unavailable_message()
+    current_model = get_user_model(g.current_user)
+    if current_model is None:
+        reply = build_unavailable_message(g.current_user)
         remember_turn(history, question, reply)
         return reply
 
     prompt = build_prompt(question, history)
-    response = model.generate_content(prompt)
+    response = current_model.generate_content(prompt)
     reply = (getattr(response, "text", "") or "").strip()
 
     if not reply:
@@ -1387,7 +1515,7 @@ def health():
     return jsonify(
         {
             "status": "ok",
-            "model_ready": model is not None,
+            "model_ready": genai is not None,
             "knowledge_loaded": bool(knowledge_chunks),
             "database_ready": DB_PATH.exists(),
         }
@@ -1605,7 +1733,23 @@ def logout_user_session() -> None:
     g.current_device = None
 
 
+def mask_secret(value: str) -> str:
+    trimmed = (value or "").strip()
+    if not trimmed:
+        return ""
+    if len(trimmed) <= 8:
+        return "*" * len(trimmed)
+    return f"{trimmed[:4]}...{trimmed[-4:]}"
+
+
+def get_personal_gemini_api_key(user_row: sqlite3.Row | None) -> str:
+    if not user_row:
+        return ""
+    return (user_row["gemini_api_key"] or "").strip()
+
+
 def serialize_user(user_row: sqlite3.Row) -> dict:
+    personal_key = get_personal_gemini_api_key(user_row)
     return {
         "id": user_row["id"],
         "full_name": user_row["full_name"],
@@ -1613,6 +1757,9 @@ def serialize_user(user_row: sqlite3.Row) -> dict:
         "email": user_row["email"],
         "phone_number": user_row["phone_number"],
         "created_at": user_row["created_at"],
+        "updated_at": user_row["updated_at"],
+        "has_personal_gemini_key": bool(personal_key),
+        "gemini_key_preview": mask_secret(personal_key),
     }
 
 
@@ -2041,6 +2188,61 @@ def list_push_tokens_for_user(user_id: int) -> list[str]:
     return [row["push_token"] for row in rows]
 
 
+def send_push_notification(
+    *,
+    target_user_id: int | None = None,
+    push_tokens: list[str] | None = None,
+    title: str,
+    body: str,
+    data: dict | None = None,
+) -> None:
+    firebase_app = get_firebase_push_app()
+    if firebase_app is None or firebase_messaging is None:
+        return
+
+    tokens = [token for token in (push_tokens or list_push_tokens_for_user(target_user_id or 0)) if token]
+    unique_tokens: list[str] = []
+    for token in tokens:
+        if token not in unique_tokens:
+            unique_tokens.append(token)
+
+    if not unique_tokens:
+        return
+
+    payload_data = {
+        str(key): str(value)
+        for key, value in (data or {}).items()
+        if value is not None
+    }
+
+    message = firebase_messaging.MulticastMessage(
+        tokens=unique_tokens,
+        notification=firebase_messaging.Notification(title=title, body=body),
+        data=payload_data,
+        android=firebase_messaging.AndroidConfig(
+            priority="high",
+            notification=firebase_messaging.AndroidNotification(
+                sound="default",
+                channel_id="emergency_calls",
+            ),
+        ),
+        apns=firebase_messaging.APNSConfig(
+            headers={"apns-priority": "10"},
+            payload=firebase_messaging.APNSPayload(
+                aps=firebase_messaging.Aps(
+                    sound="default",
+                    content_available=True,
+                )
+            ),
+        ),
+    )
+
+    try:
+        firebase_messaging.send_each_for_multicast(message, app=firebase_app)
+    except Exception:
+        return
+
+
 def build_call_invitation_payload(call_session_id: int, target_row: sqlite3.Row) -> dict:
     session_row = fetch_call_session(call_session_id)
     caller = fetch_user_by_id(session_row["caller_user_id"]) if session_row else None
@@ -2127,6 +2329,20 @@ def start_next_call_target(call_session_id: int) -> sqlite3.Row | None:
         call_session_id,
         "target_ringing",
         payload=build_call_invitation_payload(call_session_id, target_row),
+    )
+    session_payload = build_call_session_payload(call_session_id)
+    caller_row = fetch_user_by_id(session_row["caller_user_id"]) if session_row else None
+    send_push_notification(
+        target_user_id=target_row["target_user_id"],
+        title="Cuoc goi khan cap",
+        body=f"{caller_row['full_name'] if caller_row else 'Nguoi than'} dang goi ban.",
+        data={
+            "event_type": "incoming_call",
+            "call_session_id": call_session_id,
+            "room_id": session_payload["room_id"] if session_payload else None,
+            "relationship_key": target_row["relationship_key"],
+            "caller_name": caller_row["full_name"] if caller_row else None,
+        },
     )
     return fetch_call_session(call_session_id)
 

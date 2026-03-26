@@ -38,6 +38,7 @@ class AppController extends ChangeNotifier {
   BootstrapState? bootstrapState;
   UserProfile? profile;
   FamilyGroup? family;
+  List<FamilyInvitation> pendingInvitations = const [];
   List<FamilyRelationship> relationships = const [];
   List<RelationshipOption> relationshipOptions = const [];
   List<CallSession> callHistory = const [];
@@ -166,6 +167,7 @@ class AppController extends ChangeNotifier {
       _apiService.getProfile(),
       _apiService.getCallRelationshipBundle(),
       _apiService.getCurrentFamily(),
+      _apiService.getPendingFamilyInvitations(),
       _apiService.getCallHistory(),
     ]);
 
@@ -176,7 +178,8 @@ class AppController extends ChangeNotifier {
     relationshipOptions = bundle.supportedRelationships;
 
     family = results[2] as FamilyGroup?;
-    callHistory = results[3] as List<CallSession>;
+    pendingInvitations = results[3] as List<FamilyInvitation>;
+    callHistory = results[4] as List<CallSession>;
 
     await _syncRealtimeServices();
     _syncActiveCallFromHistory();
@@ -223,6 +226,19 @@ class AppController extends ChangeNotifier {
           token: pushToken,
         );
       }
+    });
+  }
+
+  Future<void> respondToInvitation({
+    required int invitationId,
+    required String action,
+  }) async {
+    await _runBusy(() async {
+      await _apiService.respondToFamilyInvitation(
+        invitationId: invitationId,
+        action: action,
+      );
+      await loadHomeData();
     });
   }
 
@@ -295,6 +311,7 @@ class AppController extends ChangeNotifier {
       activeCall = null;
       profile = null;
       family = null;
+      pendingInvitations = const [];
       relationships = const [];
       relationshipOptions = const [];
       callHistory = const [];
@@ -353,7 +370,21 @@ class AppController extends ChangeNotifier {
     }
 
     try {
-      final session = await _apiService.getCallSession(message.callSessionId);
+      if ({
+        'family_invitation',
+        'family_invitation_accepted',
+        'family_invitation_declined',
+      }.contains(message.eventType)) {
+        await loadHomeData();
+        return;
+      }
+
+      final callSessionId = message.callSessionId;
+      if (callSessionId == null || callSessionId <= 0) {
+        return;
+      }
+
+      final session = await _apiService.getCallSession(callSessionId);
       activeCall = session;
       _mergeCallIntoHistory(session);
       await _maybeJoinAcceptedCall(session);

@@ -129,6 +129,35 @@ class FamilyGroup {
   }
 }
 
+class FamilyInvitation {
+  const FamilyInvitation({
+    required this.id,
+    required this.familyGroupId,
+    required this.familyName,
+    required this.invitedByName,
+    required this.createdAt,
+    required this.status,
+  });
+
+  final int id;
+  final int familyGroupId;
+  final String familyName;
+  final String invitedByName;
+  final String createdAt;
+  final String status;
+
+  factory FamilyInvitation.fromJson(Map<String, dynamic> json) {
+    return FamilyInvitation(
+      id: json['id'] as int? ?? 0,
+      familyGroupId: json['family_group_id'] as int? ?? 0,
+      familyName: json['family_name'] as String? ?? '',
+      invitedByName: json['invited_by_name'] as String? ?? '',
+      createdAt: json['created_at'] as String? ?? '',
+      status: json['status'] as String? ?? '',
+    );
+  }
+}
+
 class FamilyRelationship {
   const FamilyRelationship({
     required this.id,

@@ -136,6 +136,19 @@ class _HomeScreenState extends State<HomeScreen> {
               pushConfigured: controller.hasPushMessagingConfig,
             ),
             const SizedBox(height: 20),
+            _InvitationCard(
+              invitations: controller.pendingInvitations,
+              busy: controller.busy,
+              onAccept: (invitationId) => controller.respondToInvitation(
+                invitationId: invitationId,
+                action: 'accept',
+              ),
+              onDecline: (invitationId) => controller.respondToInvitation(
+                invitationId: invitationId,
+                action: 'decline',
+              ),
+            ),
+            const SizedBox(height: 20),
             _ActiveCallCard(
               activeCall: controller.activeCall,
               busy: controller.busy,
@@ -348,6 +361,75 @@ class _VoiceCallCard extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class _InvitationCard extends StatelessWidget {
+  const _InvitationCard({
+    required this.invitations,
+    required this.busy,
+    required this.onAccept,
+    required this.onDecline,
+  });
+
+  final List<FamilyInvitation> invitations;
+  final bool busy;
+  final Future<void> Function(int invitationId) onAccept;
+  final Future<void> Function(int invitationId) onDecline;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Loi moi gia dinh',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 12),
+            if (invitations.isEmpty)
+              const Text('Khong co loi moi nao dang cho.')
+            else
+              ...invitations.map(
+                (invitation) => Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(invitation.familyName),
+                    subtitle: Text(
+                      'Moi boi ${invitation.invitedByName} | ${_formatTimestamp(invitation.createdAt)}',
+                    ),
+                    trailing: Wrap(
+                      spacing: 8,
+                      children: [
+                        IconButton(
+                          onPressed: busy
+                              ? null
+                              : () => onAccept(invitation.id),
+                          icon: const Icon(Icons.check_circle_outline),
+                        ),
+                        IconButton(
+                          onPressed: busy
+                              ? null
+                              : () => onDecline(invitation.id),
+                          icon: const Icon(Icons.cancel_outlined),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatTimestamp(String value) {
+    return value.replaceFirst('T', ' ').split('.').first;
   }
 }
 

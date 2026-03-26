@@ -141,7 +141,7 @@
         <nav class="section-tabs" aria-label="Chọn khu vực chức năng">
           <button class="section-tab is-active" data-section="chat" type="button">Trợ lý</button>
           <button class="section-tab" data-section="family" type="button">Gia đình</button>
-          <button class="section-tab" data-section="account" type="button">Tài khoản</button>
+          <button class="section-tab" data-section="account" type="button">Cài đặt</button>
         </nav>
 
         <section id="chatSection" class="section-panel">
@@ -253,6 +253,11 @@
 
         <section id="accountSection" class="section-panel hidden">
           <div class="panel account-grid">
+            <div class="card list-card settings-card">
+              <h3>Thông tin hiện tại</h3>
+              <div id="settingsUserSummary" class="list-stack empty-state">Chưa có dữ liệu người dùng.</div>
+            </div>
+
             <form id="profileForm" class="card form-card">
               <h3>Hồ sơ cá nhân</h3>
               <label>Họ tên
@@ -268,6 +273,19 @@
                 <input id="profilePhone" name="phone_number" type="tel" required>
               </label>
               <button type="submit" class="primary-btn">Lưu hồ sơ</button>
+            </form>
+
+            <form id="geminiKeyForm" class="card form-card">
+              <h3>Cấu hình trợ lý AI</h3>
+              <p id="geminiKeyStatus" class="muted-text">Bạn chưa thêm Gemini API key cá nhân.</p>
+              <label>Gemini API key
+                <input id="geminiApiKey" name="api_key" type="password" autocomplete="off" placeholder="Dán Gemini API key của riêng bạn">
+              </label>
+              <p class="helper-text">Muốn voice với chatbot thì hãy lấy Gemini API key của chính bạn rồi dán vào đây để tránh dùng chung và đỡ bị limit.</p>
+              <div class="form-actions">
+                <button type="submit" class="primary-btn">Lưu API key</button>
+                <button id="clearGeminiKeyBtn" type="button" class="ghost-btn">Xóa API key</button>
+              </div>
             </form>
 
             <form id="changePasswordForm" class="card form-card">

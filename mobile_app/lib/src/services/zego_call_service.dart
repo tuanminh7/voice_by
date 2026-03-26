@@ -61,8 +61,8 @@ class ZegoCallService {
       ),
       notificationConfig: ZegoCallInvitationNotificationConfig(
         androidNotificationConfig: ZegoCallAndroidNotificationConfig(
-          showOnLockedScreen: false,
-          showOnFullScreen: false,
+          showOnLockedScreen: true,
+          showOnFullScreen: true,
         ),
         iOSNotificationConfig: ZegoCallIOSNotificationConfig(
           appName: 'UT Nguyen Mobile',

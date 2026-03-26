@@ -33,6 +33,7 @@ const authForms = {
 const pinSetupForm = document.getElementById("pinSetupForm");
 const pinUnlockForm = document.getElementById("pinUnlockForm");
 const profileForm = document.getElementById("profileForm");
+const geminiKeyForm = document.getElementById("geminiKeyForm");
 const changePasswordForm = document.getElementById("changePasswordForm");
 const createFamilyForm = document.getElementById("createFamilyForm");
 const renameFamilyForm = document.getElementById("renameFamilyForm");
@@ -45,6 +46,7 @@ const callPriorityOrderInput = document.getElementById("callPriorityOrder");
 const saveCallRelationshipBtn = document.getElementById("saveCallRelationshipBtn");
 const resetCallRelationshipBtn = document.getElementById("resetCallRelationshipBtn");
 const refreshFamilyBtn = document.getElementById("refreshFamilyBtn");
+const clearGeminiKeyBtn = document.getElementById("clearGeminiKeyBtn");
 const logoutBtn = document.getElementById("logoutBtn");
 
 const familySummaryText = document.getElementById("familySummaryText");
@@ -52,6 +54,9 @@ const familyMembersList = document.getElementById("familyMembersList");
 const familyInvitationsList = document.getElementById("familyInvitationsList");
 const callRelationshipsList = document.getElementById("callRelationshipsList");
 const renameFamilyInput = document.getElementById("renameFamilyInput");
+const settingsUserSummary = document.getElementById("settingsUserSummary");
+const geminiKeyStatus = document.getElementById("geminiKeyStatus");
+const geminiApiKeyInput = document.getElementById("geminiApiKey");
 
 const chatLog = document.getElementById("chatLog");
 const chatForm = document.getElementById("chatForm");
@@ -257,6 +262,19 @@ function applyBootstrap(bootstrap) {
   }
 }
 
+function formatDateTime(value) {
+  if (!value) {
+    return "Chưa có dữ liệu";
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+
+  return parsed.toLocaleString("vi-VN");
+}
+
 function fillProfile(user) {
   if (!user) {
     return;
@@ -266,6 +284,23 @@ function fillProfile(user) {
   document.getElementById("profileAge").value = user.age || "";
   document.getElementById("profileEmail").value = user.email || "";
   document.getElementById("profilePhone").value = user.phone_number || "";
+  geminiApiKeyInput.value = "";
+  geminiKeyStatus.textContent = user.has_personal_gemini_key
+    ? `Da luu Gemini API key ca nhan (${user.gemini_key_preview || "da che"}).`
+    : "Ban chua them Gemini API key ca nhan.";
+  settingsUserSummary.className = "list-stack";
+  settingsUserSummary.innerHTML = `
+    <article class="list-item">
+      <div>
+        <strong>${user.full_name || "Nguoi dung"}</strong>
+        <div class="muted-text">Tuoi: ${user.age || "-"} - Email: ${user.email || "-"}</div>
+        <div class="muted-text">So dien thoai: ${user.phone_number || "-"}</div>
+        <div class="muted-text">Ngay tao tai khoan: ${formatDateTime(user.created_at)}</div>
+        <div class="muted-text">Cap nhat gan nhat: ${formatDateTime(user.updated_at)}</div>
+        <div class="muted-text">Trang thai Gemini key: ${user.has_personal_gemini_key ? "Da cau hinh" : "Chua cau hinh"}</div>
+      </div>
+    </article>
+  `;
 }
 
 function getFamilyCallCandidates() {
@@ -796,6 +831,12 @@ async function sendMessage(text) {
       }
     }
 
+    if (!state.me?.user?.has_personal_gemini_key) {
+      assistantBody.textContent = "Ban hay vao Cai dat va them Gemini API key ca nhan truoc khi chat voice voi tro ly.";
+      setStatus("Can Gemini API key ca nhan de tro chuyen.");
+      return;
+    }
+
     const response = await fetch("/chat_stream", {
       method: "POST",
       headers: {
@@ -1102,12 +1143,53 @@ async function submitProfile(event) {
     });
     state.me = { ...state.me, user: data.user };
     welcomeName.textContent = data.user.full_name;
+    fillProfile(data.user);
     showBanner(data.message);
   } catch (error) {
     if (await handleProtectedError(error)) {
       return;
     }
     showBanner(normalizeErrorMessage(error, "Không cập nhật được hồ sơ."), "error");
+  }
+}
+
+async function submitGeminiKey(event) {
+  event.preventDefault();
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/me/gemini-key", {
+      method: "POST",
+      body: JSON.stringify({
+        api_key: geminiApiKeyInput.value.trim()
+      })
+    });
+    state.me = { ...state.me, user: data.user };
+    fillProfile(data.user);
+    showBanner(data.message);
+  } catch (error) {
+    if (await handleProtectedError(error)) {
+      return;
+    }
+    showBanner(normalizeErrorMessage(error, "Khong luu duoc Gemini API key."), "error");
+  }
+}
+
+async function clearGeminiKey() {
+  showBanner("");
+
+  try {
+    const data = await requestJson("/api/me/gemini-key", {
+      method: "DELETE"
+    });
+    state.me = { ...state.me, user: data.user };
+    fillProfile(data.user);
+    showBanner(data.message);
+  } catch (error) {
+    if (await handleProtectedError(error)) {
+      return;
+    }
+    showBanner(normalizeErrorMessage(error, "Khong xoa duoc Gemini API key."), "error");
   }
 }
 
@@ -1340,6 +1422,7 @@ authForms.reset.addEventListener("submit", submitResetPassword);
 pinSetupForm.addEventListener("submit", submitPinSetup);
 pinUnlockForm.addEventListener("submit", submitPinUnlock);
 profileForm.addEventListener("submit", submitProfile);
+geminiKeyForm.addEventListener("submit", submitGeminiKey);
 changePasswordForm.addEventListener("submit", submitChangePassword);
 createFamilyForm.addEventListener("submit", submitCreateFamily);
 renameFamilyForm.addEventListener("submit", submitRenameFamily);
@@ -1368,6 +1451,11 @@ installAppBtn.addEventListener("click", () => {
 
 resetCallRelationshipBtn.addEventListener("click", () => {
   resetCallRelationshipForm();
+});
+clearGeminiKeyBtn.addEventListener("click", () => {
+  clearGeminiKey().catch(() => {
+    showBanner("Khong xoa duoc Gemini API key.", "error");
+  });
 });
 
 refreshFamilyBtn.addEventListener("click", () => {

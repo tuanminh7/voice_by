@@ -263,6 +263,36 @@ class ApiService {
     }
   }
 
+  Future<List<FamilyInvitation>> getPendingFamilyInvitations() async {
+    try {
+      final response =
+          await _dio.get<Map<String, dynamic>>('/api/families/invitations');
+      final rows =
+          (response.data ?? const {})['invitations'] as List<dynamic>? ??
+              const [];
+      return rows
+          .whereType<Map<String, dynamic>>()
+          .map(FamilyInvitation.fromJson)
+          .toList();
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
+  Future<void> respondToFamilyInvitation({
+    required int invitationId,
+    required String action,
+  }) async {
+    try {
+      await _dio.post<Map<String, dynamic>>(
+        '/api/families/invitations/$invitationId/respond',
+        data: {'action': action},
+      );
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
   Future<void> registerPushToken({
     required String platform,
     required String pushToken,

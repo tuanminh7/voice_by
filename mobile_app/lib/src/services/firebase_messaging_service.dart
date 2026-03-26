@@ -7,11 +7,13 @@ import 'package:flutter/foundation.dart';
 
 class CallPushMessage {
   const CallPushMessage({
+    required this.eventType,
     required this.callSessionId,
     required this.payload,
   });
 
-  final int callSessionId;
+  final String eventType;
+  final int? callSessionId;
   final Map<String, dynamic> payload;
 }
 
@@ -125,14 +127,16 @@ class FirebaseMessagingService {
       return null;
     }
 
+    final eventType = '${message.data['event_type'] ?? ''}'.trim();
     final rawValue =
         message.data['call_session_id'] ?? message.data['callSessionId'];
     final callSessionId = int.tryParse('$rawValue');
-    if (callSessionId == null || callSessionId <= 0) {
+    if ((callSessionId == null || callSessionId <= 0) && eventType.isEmpty) {
       return null;
     }
 
     return CallPushMessage(
+      eventType: eventType,
       callSessionId: callSessionId,
       payload: Map<String, dynamic>.from(message.data),
     );
