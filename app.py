@@ -12,7 +12,7 @@ from functools import wraps
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, Response, g, jsonify, render_template, request, session, stream_with_context
+from flask import Flask, Response, g, jsonify, render_template, request, session, stream_with_context, url_for
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -46,6 +46,8 @@ CALL_PROVIDER = (os.getenv("CALL_PROVIDER", "zegocloud") or "zegocloud").strip()
 CALL_RING_TIMEOUT_SECONDS = int(os.getenv("CALL_RING_TIMEOUT_SECONDS", "30"))
 CALL_MAX_TARGETS = int(os.getenv("CALL_MAX_TARGETS", "3"))
 FIREBASE_SERVICE_ACCOUNT_JSON = (os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "") or "").strip()
+ANDROID_APP_DOWNLOAD_URL = (os.getenv("ANDROID_APP_DOWNLOAD_URL", "") or "").strip()
+ANDROID_APK_STATIC_PATH = BASE_DIR / "static" / "downloads" / "ut-nguyen-android-release.apk"
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
@@ -1528,9 +1530,23 @@ def generate_reply(question: str, history: list[str]) -> str:
     return reply
 
 
+def get_android_download_url() -> str | None:
+    if ANDROID_APP_DOWNLOAD_URL:
+        return ANDROID_APP_DOWNLOAD_URL
+    if ANDROID_APK_STATIC_PATH.exists():
+        return url_for("static", filename="downloads/ut-nguyen-android-release.apk")
+    return None
+
+
 @app.route("/")
 def index():
-    return render_template("index.html", model_name=MODEL_NAME)
+    android_download_url = get_android_download_url()
+    return render_template(
+        "index.html",
+        model_name=MODEL_NAME,
+        android_download_url=android_download_url,
+        android_download_ready=bool(android_download_url),
+    )
 
 
 @app.route("/health")

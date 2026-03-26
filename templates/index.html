@@ -9,7 +9,6 @@
     name="description"
     content="Website UT Nguyen chi dung de tai ung dung. Moi tinh nang dang nhap, tro ly va cuoc goi se duoc dung hoan toan trong app."
   >
-  <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -44,11 +43,24 @@
         <div class="download-hero-card">
           <div class="download-badge">Tai ung dung</div>
           <h3>Chon thiet bi cua ban</h3>
-          <p>App duoc cai truc tiep tu trinh duyet tren Android va desktop neu trinh duyet ho tro.</p>
+          <p>Website nay se dan ban sang ban native. Khong dung kieu cai app PWA tu trinh duyet nua.</p>
           <div class="download-actions">
-            <button id="installAndroidBtn" type="button" class="primary-btn">Cai app tren Android</button>
-            <button id="openDownloadModalBtn" type="button" class="ghost-btn">Huong dan cho desktop</button>
+            {% if android_download_ready %}
+            <a
+              class="primary-btn"
+              href="{{ android_download_url }}"
+              download
+            >Tai APK Android</a>
+            {% endif %}
+            <button id="openDownloadModalBtn" type="button" class="primary-btn">Xem huong dan cai app native</button>
           </div>
+          <p class="helper-text hero-helper">
+            {% if android_download_ready %}
+            Ban Android da san sang. Bam nut tai APK de cai truc tiep tu trinh duyet.
+            {% else %}
+            APK Android se duoc hien tai day ngay khi file build release duoc dua len web.
+            {% endif %}
+          </p>
         </div>
       </section>
     </main>
@@ -66,36 +78,25 @@
       </div>
 
       <div class="download-grid">
-        <button
-          id="modalInstallAndroidBtn"
-          type="button"
-          class="download-option download-option-button"
-          data-download-link="android-browser"
-        >
-          <strong>Android</strong>
-          <span>Cai truc tiep tu Chrome/Android bang popup cai dat hoac Add to Home Screen.</span>
-        </button>
-
-        <article class="download-option">
-          <strong>Laptop / Desktop</strong>
-          <span>Mo website bang Chrome hoac Edge, sau do chon Install app / Apps / Create shortcut tuy theo trinh duyet.</span>
+        {% if android_download_ready %}
+        <a class="download-option" href="{{ android_download_url }}" download>
+          <strong>Android APK</strong>
+          <span>Tai truc tiep file cai dat Android native tu website, sau do mo file APK de cai app.</span>
+        </a>
+        {% else %}
+        <article class="download-option is-disabled">
+          <strong>Android APK</strong>
+          <span>Link tai APK chua duoc gan. Sau khi build xong file release, web se hien nut tai truc tiep tai day.</span>
         </article>
+        {% endif %}
       </div>
 
       <p class="helper-text">
-        Neu chua thay popup cai dat, hay mo menu trinh duyet va chon Add to Home Screen, Install app, Apps hoac
-        Create shortcut tuy thiet bi.
+        Android la luong chinh hien tai. iPhone va desktop se khong hien tren web cho den khi co ban native rieng.
       </p>
     </div>
   </div>
 
   <script src="{{ url_for('static', filename='script.js') }}"></script>
-  <script>
-    if ("serviceWorker" in navigator) {
-      window.addEventListener("load", () => {
-        navigator.serviceWorker.register("{{ url_for('static', filename='sw.js') }}");
-      });
-    }
-  </script>
 </body>
 </html>
