@@ -1914,6 +1914,8 @@ RELATIONSHIP_LABELS = {
     "son": "con trai",
     "daughter": "con gái",
     "grandchild": "cháu",
+    "grandfather": "ông",
+    "grandmother": "bà",
     "wife": "vợ",
     "husband": "chồng",
     "brother": "anh/em trai",
@@ -1932,6 +1934,12 @@ RELATIONSHIP_ALIASES = {
     "chau": "grandchild",
     "chau noi": "grandchild",
     "chau ngoai": "grandchild",
+    "ong": "grandfather",
+    "ong noi": "grandfather",
+    "ong ngoai": "grandfather",
+    "ba": "grandmother",
+    "ba noi": "grandmother",
+    "ba ngoai": "grandmother",
     "vo": "wife",
     "chong": "husband",
     "anh": "brother",
@@ -2594,6 +2602,22 @@ def detect_call_intent(text: str, relationship_rows: list[sqlite3.Row]) -> dict:
     if "goi y" in simplified or not any(re.search(pattern, simplified) for pattern in call_patterns):
         return {"type": "chat"}
 
+    generic_call_phrases = [
+        "giup toi goi",
+        "hay goi",
+        "goi cho",
+        "lien lac",
+        "call",
+        "goi",
+    ]
+    remaining_target_hint = simplified
+    for phrase in generic_call_phrases:
+        if remaining_target_hint.startswith(phrase):
+            remaining_target_hint = remaining_target_hint[len(phrase):].strip()
+            break
+
+    is_generic_call_request = not remaining_target_hint
+
     available_relationship_keys = sorted({row["relationship_key"] for row in relationship_rows})
     person_alias_map = build_person_call_aliases(relationship_rows)
     matched_people = []
@@ -2658,7 +2682,7 @@ def detect_call_intent(text: str, relationship_rows: list[sqlite3.Row]) -> dict:
             "question": f"Bác muốn gọi {', '.join(labels)} ạ?",
         }
 
-    if len(available_relationship_keys) == 1:
+    if len(available_relationship_keys) == 1 and is_generic_call_request:
         only_key = available_relationship_keys[0]
         return {
             "type": "call",
@@ -2674,7 +2698,10 @@ def detect_call_intent(text: str, relationship_rows: list[sqlite3.Row]) -> dict:
             "relationship_key": None,
             "confidence": 0.35,
             "needs_confirmation": True,
-            "question": f"Bác muốn gọi {', '.join(labels)} ạ?",
+            "question": (
+                f"Toi chua khop dung nguoi ban muon goi. "
+                f"Hien gia dinh dang cau hinh: {', '.join(labels)}."
+            ),
         }
 
     return {
