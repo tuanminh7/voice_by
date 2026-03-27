@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../config/app_config.dart';
 import '../state/app_controller.dart';
 
 class AuthScreen extends StatefulWidget {
@@ -55,6 +56,28 @@ class _AuthScreenState extends State<AuthScreen> {
               const SizedBox(height: 8),
               const Text(
                 'Flow nay se dung lai backend v1 hien tai, sau do vao PIN va chuc nang goi khan cap.',
+              ),
+              const SizedBox(height: 16),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Backend URL',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 8),
+                      SelectableText(AppConfig.baseUrl),
+                      const SizedBox(height: 8),
+                      Text(
+                        AppConfig.backendConnectionHint,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
               ),
               const SizedBox(height: 20),
               SegmentedButton<bool>(

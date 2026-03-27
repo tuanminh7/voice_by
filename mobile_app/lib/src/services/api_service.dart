@@ -59,14 +59,54 @@ class ApiService {
   }
 
   ApiException _toApiException(Object error) {
+    if (error is SocketException) {
+      return ApiException(_buildConnectionErrorMessage(error.message));
+    }
+
     if (error is DioException) {
       final data = error.response?.data;
       if (data is Map<String, dynamic> && data['error'] is String) {
         return ApiException(data['error'] as String);
       }
+      if (_isConnectionError(error)) {
+        final rawMessage = [
+          error.message,
+          if (error.error is SocketException)
+            (error.error as SocketException).message,
+        ].whereType<String>().join(' | ');
+        return ApiException(_buildConnectionErrorMessage(rawMessage));
+      }
       return ApiException(error.message ?? 'Yeu cau that bai.');
     }
     return ApiException(error.toString());
+  }
+
+  bool _isConnectionError(DioException error) {
+    return error.type == DioExceptionType.connectionError ||
+        error.type == DioExceptionType.connectionTimeout ||
+        error.error is SocketException;
+  }
+
+  String _buildConnectionErrorMessage(String rawMessage) {
+    final normalizedMessage = rawMessage.toLowerCase();
+    var reason =
+        'App chua ket noi duoc toi backend Flask. Hay kiem tra lai `APP_BASE_URL` va dam bao server dang chay.';
+
+    if (normalizedMessage.contains('no route to host')) {
+      reason =
+          'Thiet bi hien tai khong the di toi host backend. Thuong la do `APP_BASE_URL` dang tro den dia chi chi hop voi emulator, khong hop voi may that.';
+    } else if (normalizedMessage.contains('connection refused')) {
+      reason =
+          'Da tim thay host backend nhung cong dich vu dang tu choi ket noi. Kha nang cao la Flask/Gunicorn chua chay hoac dang chay sai cong.';
+    } else if (normalizedMessage.contains('failed host lookup')) {
+      reason =
+          'Khong phan giai duoc ten mien backend. Hay kiem tra lai host trong `APP_BASE_URL`.';
+    } else if (normalizedMessage.contains('timed out')) {
+      reason =
+          'Ket noi toi backend bi het thoi gian cho. Hay kiem tra mang giua thiet bi va may chay Flask.';
+    }
+
+    return '$reason\n\n${AppConfig.backendConnectionHint}';
   }
 
   Future<BootstrapState> bootstrap() async {
