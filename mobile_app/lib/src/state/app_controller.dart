@@ -272,6 +272,32 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  Future<void> createFamily(String familyName) async {
+    await _runBusy(() async {
+      family = await _apiService.createFamily(familyName);
+      await loadHomeData();
+    });
+  }
+
+  Future<void> inviteFamilyMember(String identifier) async {
+    await _runBusy(() async {
+      await _apiService.inviteFamilyMember(identifier);
+      await loadHomeData();
+    });
+  }
+
+  Future<void> saveGeminiApiKey(String apiKey) async {
+    await _runBusy(() async {
+      profile = await _apiService.saveGeminiApiKey(apiKey);
+    });
+  }
+
+  Future<void> deleteGeminiApiKey() async {
+    await _runBusy(() async {
+      profile = await _apiService.deleteGeminiApiKey();
+    });
+  }
+
   Future<void> createVoiceCall(String transcriptText) async {
     await _runBusy(() async {
       activeCall = await _apiService.createVoiceCall(transcriptText);

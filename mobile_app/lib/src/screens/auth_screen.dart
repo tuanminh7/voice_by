@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../config/app_config.dart';
 import '../state/app_controller.dart';
 
 class AuthScreen extends StatefulWidget {
@@ -40,73 +39,28 @@ class _AuthScreenState extends State<AuthScreen> {
     final controller = context.watch<AppController>();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Icare dang nhap')),
+      appBar: AppBar(title: const Text('Icare')),
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(20),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.amber.shade100,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.amber.shade700),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Ban build moi',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 4),
-                    SelectableText(
-                      '${AppConfig.releaseLabel} | ${AppConfig.baseUrl}',
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 20),
               Text(
                 isRegister
-                    ? 'Tao tai khoan cho app mobile'
-                    : 'Dang nhap lai bang tai khoan da co',
+                    ? 'Tạo tài khoản'
+                    : 'Đăng nhập',
                 style: Theme.of(context).textTheme.headlineSmall,
               ),
               const SizedBox(height: 8),
               const Text(
-                'Flow nay se dung lai backend v1 hien tai, sau do vao PIN va chuc nang goi khan cap.',
-              ),
-              const SizedBox(height: 16),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Backend URL',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      const SizedBox(height: 8),
-                      SelectableText(AppConfig.baseUrl),
-                      const SizedBox(height: 8),
-                      Text(
-                        AppConfig.backendConnectionHint,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
-                ),
+                'Icare hỗ trợ trò chuyện, nhắn tin gia đình và gọi khẩn cấp cho người thân.',
               ),
               const SizedBox(height: 20),
               SegmentedButton<bool>(
                 segments: const [
-                  ButtonSegment<bool>(value: false, label: Text('Dang nhap')),
-                  ButtonSegment<bool>(value: true, label: Text('Dang ky')),
+                  ButtonSegment<bool>(value: false, label: Text('Đăng nhập')),
+                  ButtonSegment<bool>(value: true, label: Text('Đăng ký')),
                 ],
                 selected: {isRegister},
                 onSelectionChanged: (selection) {
@@ -120,13 +74,14 @@ class _AuthScreenState extends State<AuthScreen> {
                 TextField(
                   controller: _loginIdentifier,
                   decoration: const InputDecoration(
-                      labelText: 'Email hoac so dien thoai'),
+                    labelText: 'Email hoặc số điện thoại',
+                  ),
                 ),
                 const SizedBox(height: 12),
                 TextField(
                   controller: _loginPassword,
                   obscureText: true,
-                  decoration: const InputDecoration(labelText: 'Mat khau'),
+                  decoration: const InputDecoration(labelText: 'Mật khẩu'),
                 ),
                 const SizedBox(height: 16),
                 FilledButton(
@@ -136,18 +91,18 @@ class _AuthScreenState extends State<AuthScreen> {
                             identifier: _loginIdentifier.text.trim(),
                             password: _loginPassword.text,
                           ),
-                  child: const Text('Dang nhap'),
+                  child: const Text('Đăng nhập'),
                 ),
               ] else ...[
                 TextField(
                   controller: _fullName,
-                  decoration: const InputDecoration(labelText: 'Ho ten'),
+                  decoration: const InputDecoration(labelText: 'Họ tên'),
                 ),
                 const SizedBox(height: 12),
                 TextField(
                   controller: _age,
                   keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: 'Tuoi'),
+                  decoration: const InputDecoration(labelText: 'Tuổi'),
                 ),
                 const SizedBox(height: 12),
                 TextField(
@@ -158,13 +113,13 @@ class _AuthScreenState extends State<AuthScreen> {
                 TextField(
                   controller: _phone,
                   keyboardType: TextInputType.phone,
-                  decoration: const InputDecoration(labelText: 'So dien thoai'),
+                  decoration: const InputDecoration(labelText: 'Số điện thoại'),
                 ),
                 const SizedBox(height: 12),
                 TextField(
                   controller: _registerPassword,
                   obscureText: true,
-                  decoration: const InputDecoration(labelText: 'Mat khau'),
+                  decoration: const InputDecoration(labelText: 'Mật khẩu'),
                 ),
                 const SizedBox(height: 16),
                 FilledButton(
@@ -177,7 +132,7 @@ class _AuthScreenState extends State<AuthScreen> {
                             phoneNumber: _phone.text.trim(),
                             password: _registerPassword.text,
                           ),
-                  child: const Text('Tao tai khoan'),
+                  child: const Text('Tạo tài khoản'),
                 ),
               ],
               if (controller.busy) ...[

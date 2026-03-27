@@ -44,6 +44,8 @@ class UserProfile {
     required this.age,
     required this.email,
     required this.phoneNumber,
+    required this.hasPersonalGeminiKey,
+    required this.geminiKeyPreview,
   });
 
   final int id;
@@ -51,6 +53,8 @@ class UserProfile {
   final int age;
   final String email;
   final String phoneNumber;
+  final bool hasPersonalGeminiKey;
+  final String geminiKeyPreview;
 
   factory UserProfile.fromJson(Map<String, dynamic> json) {
     return UserProfile(
@@ -59,6 +63,8 @@ class UserProfile {
       age: json['age'] as int? ?? 0,
       email: json['email'] as String? ?? '',
       phoneNumber: json['phone_number'] as String? ?? '',
+      hasPersonalGeminiKey: json['has_personal_gemini_key'] as bool? ?? false,
+      geminiKeyPreview: json['gemini_key_preview'] as String? ?? '',
     );
   }
 }

@@ -323,6 +323,32 @@ class ApiService {
     }
   }
 
+  Future<FamilyGroup> createFamily(String familyName) async {
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/api/families',
+        data: {'family_name': familyName},
+      );
+      return FamilyGroup.fromJson(
+        (response.data ?? const {})['family'] as Map<String, dynamic>? ??
+            const {},
+      );
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
+  Future<void> inviteFamilyMember(String identifier) async {
+    try {
+      await _dio.post<Map<String, dynamic>>(
+        '/api/families/current/invitations',
+        data: {'identifier': identifier},
+      );
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
   Future<void> respondToFamilyInvitation({
     required int invitationId,
     required String action,
@@ -348,6 +374,35 @@ class ApiService {
           'platform': platform,
           'push_token': pushToken,
         },
+      );
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
+  Future<UserProfile> saveGeminiApiKey(String apiKey) async {
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/api/me/gemini-key',
+        data: {'api_key': apiKey},
+      );
+      return UserProfile.fromJson(
+        (response.data ?? const {})['user'] as Map<String, dynamic>? ??
+            const {},
+      );
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
+  Future<UserProfile> deleteGeminiApiKey() async {
+    try {
+      final response = await _dio.delete<Map<String, dynamic>>(
+        '/api/me/gemini-key',
+      );
+      return UserProfile.fromJson(
+        (response.data ?? const {})['user'] as Map<String, dynamic>? ??
+            const {},
       );
     } catch (error) {
       throw _toApiException(error);
