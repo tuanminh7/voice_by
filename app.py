@@ -1234,6 +1234,103 @@ def delete_call_relationship(relationship_id: int):
     return jsonify({"message": "Đã xóa quan hệ gọi.", "relationships": list_call_relationships(g.current_user["id"])})
 
 
+def get_pending_voice_call_intent() -> dict | None:
+    payload = session.get(PENDING_VOICE_CALL_SESSION_KEY)
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def clear_pending_voice_call_intent() -> None:
+    session.pop(PENDING_VOICE_CALL_SESSION_KEY, None)
+    session.modified = True
+
+
+def save_pending_voice_call_intent(
+    *,
+    relationship_key: str,
+    relative_user_id: int | None,
+    transcript_text: str,
+    target_label: str,
+) -> None:
+    session[PENDING_VOICE_CALL_SESSION_KEY] = {
+        "relationship_key": relationship_key,
+        "relative_user_id": relative_user_id,
+        "transcript_text": transcript_text,
+        "target_label": target_label,
+        "created_at": utcnow_iso(),
+    }
+    session.modified = True
+
+
+def is_voice_confirmation_reply(text: str) -> bool:
+    simplified = simplify_text(text)
+    confirmation_phrases = (
+        "xac nhan",
+        "dong y",
+        "duoc",
+        "duoc roi",
+        "ok",
+        "ok roi",
+        "goi di",
+        "goi ngay",
+        "dung roi",
+        "phai",
+    )
+    return any(
+        simplified == phrase
+        or simplified.startswith(f"{phrase} ")
+        or simplified.endswith(f" {phrase}")
+        for phrase in confirmation_phrases
+    )
+
+
+def is_voice_cancel_reply(text: str) -> bool:
+    simplified = simplify_text(text)
+    cancel_phrases = (
+        "huy",
+        "huy bo",
+        "thoi",
+        "dung lai",
+        "khong goi",
+        "khong can",
+        "khong dong y",
+        "bo qua",
+    )
+    return any(
+        simplified == phrase
+        or simplified.startswith(f"{phrase} ")
+        or simplified.endswith(f" {phrase}")
+        for phrase in cancel_phrases
+    )
+
+
+def describe_call_target(
+    relationship_key: str,
+    relationship_rows: list[sqlite3.Row],
+    *,
+    relative_user_id: int | None = None,
+) -> str:
+    relationship_label = RELATIONSHIP_LABELS.get(relationship_key, relationship_key)
+    if relative_user_id is None:
+        return relationship_label
+
+    for row in relationship_rows:
+        if row["relationship_key"] != relationship_key or row["relative_user_id"] != relative_user_id:
+            continue
+        full_name = (row["relative_full_name"] or "").strip()
+        if full_name:
+            return f"{full_name} ({relationship_label})"
+        break
+
+    return relationship_label
+
+
+def build_voice_confirmation_message(user_row: sqlite3.Row, target_label: str) -> str:
+    user_title = get_user_voice_title(user_row)
+    return f"{user_title} muốn gọi {target_label}. Nếu đúng, {user_title.lower()} hãy nói 'xác nhận'."
+
+
 @app.route("/api/calls/voice-intent", methods=["POST"])
 @pin_required
 def create_call_from_voice_intent():
@@ -1243,6 +1340,107 @@ def create_call_from_voice_intent():
         return json_error("Thiếu nội dung giọng nói đã nhận dạng.", 400, "missing_transcript")
 
     relationship_rows = list_call_relationship_rows(g.current_user["id"])
+    pending_intent = get_pending_voice_call_intent()
+    intent = detect_call_intent(transcript_text, relationship_rows)
+
+    if pending_intent and intent.get("type") == "call":
+        clear_pending_voice_call_intent()
+        pending_intent = None
+
+    if pending_intent and is_voice_confirmation_reply(transcript_text):
+        session_row = create_call_session_for_relationship(
+            caller_user_id=g.current_user["id"],
+            relationship_key=pending_intent["relationship_key"],
+            relative_user_id=pending_intent.get("relative_user_id"),
+            transcript_text=pending_intent.get("transcript_text") or transcript_text,
+            trigger_source="voice",
+        )
+        clear_pending_voice_call_intent()
+        if not session_row:
+            return json_error("Gia đình chưa cài đặt người nhận cho lệnh gọi này.", 404, "call_target_not_found")
+
+        return jsonify(
+            {
+                "action": "calling",
+                "message": f"Đang gọi {pending_intent['target_label']} cho {get_user_voice_title(g.current_user).lower()}.",
+                "call": build_call_session_payload(session_row["id"]),
+            }
+        )
+
+    if pending_intent and is_voice_cancel_reply(transcript_text):
+        clear_pending_voice_call_intent()
+        return jsonify(
+            {
+                "action": "chat",
+                "message": "Đã hủy yêu cầu gọi. Mình tiếp tục trò chuyện với bác nhé.",
+            }
+        )
+
+    if intent.get("type") != "call":
+        if pending_intent:
+            return jsonify(
+                {
+                    "action": "confirm",
+                    "message": build_voice_confirmation_message(
+                        g.current_user,
+                        pending_intent["target_label"],
+                    ),
+                    "question": build_voice_confirmation_message(
+                        g.current_user,
+                        pending_intent["target_label"],
+                    ),
+                }
+            )
+
+        reply = generate_reply(transcript_text, get_history())
+        emotion_signal = maybe_log_emotion_signal(
+            g.current_user,
+            transcript_text,
+            source="assistant_voice",
+        )
+        return jsonify(
+            {
+                "action": "chat",
+                "message": reply,
+                "emotion_signal": emotion_signal,
+            }
+        )
+
+    if intent.get("needs_confirmation") or not intent.get("relationship_key"):
+        clear_pending_voice_call_intent()
+        question = intent.get("question") or "Bác muốn gọi ai ạ?"
+        return jsonify(
+            {
+                "action": "confirm",
+                "message": question,
+                "question": question,
+                "intent": intent,
+            }
+        )
+
+    target_label = describe_call_target(
+        intent["relationship_key"],
+        relationship_rows,
+        relative_user_id=intent.get("relative_user_id"),
+    )
+    save_pending_voice_call_intent(
+        relationship_key=intent["relationship_key"],
+        relative_user_id=intent.get("relative_user_id"),
+        transcript_text=transcript_text,
+        target_label=target_label,
+    )
+    confirmation_message = build_voice_confirmation_message(
+        g.current_user,
+        target_label,
+    )
+    return jsonify(
+        {
+            "action": "confirm",
+            "message": confirmation_message,
+            "question": confirmation_message,
+        }
+    )
+
     intent = detect_call_intent(transcript_text, relationship_rows)
     if intent.get("type") != "call":
         return jsonify({"action": "chat", "message": "Đây chưa phải là lệnh gọi khẩn cấp."})
@@ -1522,6 +1720,7 @@ def search_context(question: str) -> str:
 
 
 def build_prompt(question: str, history: list[str]) -> str:
+    user_title = get_user_voice_title(g.current_user)
     history_text = "\n".join(history[-6:]) or "Chưa có lịch sử hội thoại."
     context = search_context(question) or knowledge or "Không có dữ liệu tham khảo bổ sung."
 
@@ -2131,6 +2330,7 @@ RELATIONSHIP_ALIASES = {
 
 FINAL_CALL_STATUSES = {"accepted", "declined", "timeout", "missed", "ended", "failed"}
 FINAL_CALL_TARGET_STATUSES = {"accepted", "declined", "timeout", "skipped", "missed"}
+PENDING_VOICE_CALL_SESSION_KEY = "pending_voice_call_intent"
 
 
 def simplify_text(value: str) -> str:
@@ -2143,6 +2343,47 @@ def simplify_text(value: str) -> str:
 def normalize_relationship_key(value: str) -> str:
     simplified = simplify_text(value)
     return RELATIONSHIP_ALIASES.get(simplified, simplified)
+
+
+def get_user_care_role_key(user_row: sqlite3.Row | None) -> str | None:
+    if user_row is None:
+        return None
+
+    membership = get_active_family_membership(user_row["id"])
+    if membership:
+        relationship_row = fetch_one(
+            """
+            SELECT relationship_key
+            FROM family_relationships
+            WHERE family_group_id = ?
+              AND relative_user_id = ?
+              AND is_active = 1
+              AND relationship_key IN ('grandfather', 'grandmother')
+            ORDER BY CASE relationship_key
+                WHEN 'grandmother' THEN 0
+                WHEN 'grandfather' THEN 1
+                ELSE 2
+            END ASC, priority_order ASC, id ASC
+            LIMIT 1
+            """,
+            (membership["family_group_id"], user_row["id"]),
+        )
+        if relationship_row is not None:
+            return relationship_row["relationship_key"]
+
+    if int(user_row["age"] or 0) >= ELDER_MIN_AGE:
+        return "elder"
+
+    return None
+
+
+def get_user_voice_title(user_row: sqlite3.Row | None) -> str:
+    role_key = get_user_care_role_key(user_row)
+    return {
+        "grandfather": "Ông",
+        "grandmother": "Bà",
+        "elder": "Bác",
+    }.get(role_key, "Bạn")
 
 
 def analyze_emotion_signal(message_text: str) -> dict:
