@@ -36,7 +36,7 @@ class ApiService {
         headers: {
           HttpHeaders.contentTypeHeader: 'application/json',
           HttpHeaders.userAgentHeader:
-              'ut-nguyen-mobile/1.0 (flutter; ${Platform.operatingSystem})',
+              'icare-mobile/1.0 (flutter; ${Platform.operatingSystem})',
           'X-Client-Source': 'flutter-mobile',
           'X-Client-Platform': Platform.operatingSystem,
         },
@@ -348,6 +348,76 @@ class ApiService {
           'platform': platform,
           'push_token': pushToken,
         },
+      );
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
+  Future<EmotionDashboard?> getEmotionDashboard() async {
+    try {
+      final response =
+          await _dio.get<Map<String, dynamic>>('/api/emotions/dashboard');
+      final payload = (response.data ?? const {})['dashboard'];
+      if (payload is! Map<String, dynamic>) {
+        return null;
+      }
+      return EmotionDashboard.fromJson(payload);
+    } catch (error) {
+      if (error is DioException && error.response?.statusCode == 403) {
+        return null;
+      }
+      throw _toApiException(error);
+    }
+  }
+
+  Future<List<FamilyChatThread>> getFamilyChatThreads() async {
+    try {
+      final response =
+          await _dio.get<Map<String, dynamic>>('/api/family-chat/threads');
+      final rows =
+          (response.data ?? const {})['threads'] as List<dynamic>? ?? const [];
+      return rows
+          .whereType<Map<String, dynamic>>()
+          .map(FamilyChatThread.fromJson)
+          .toList();
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
+  Future<List<FamilyChatMessage>> getFamilyChatMessages(int partnerUserId) async {
+    try {
+      final response = await _dio.get<Map<String, dynamic>>(
+        '/api/family-chat/messages',
+        queryParameters: {'partner_user_id': partnerUserId},
+      );
+      final rows =
+          (response.data ?? const {})['messages'] as List<dynamic>? ?? const [];
+      return rows
+          .whereType<Map<String, dynamic>>()
+          .map(FamilyChatMessage.fromJson)
+          .toList();
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
+  Future<FamilyChatMessage> sendFamilyChatMessage({
+    required int recipientUserId,
+    required String messageText,
+  }) async {
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/api/family-chat/messages',
+        data: {
+          'recipient_user_id': recipientUserId,
+          'message_text': messageText,
+        },
+      );
+      return FamilyChatMessage.fromJson(
+        (response.data ?? const {})['chat_message'] as Map<String, dynamic>? ??
+            const {},
       );
     } catch (error) {
       throw _toApiException(error);

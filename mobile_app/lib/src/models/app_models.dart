@@ -336,3 +336,249 @@ class CallSession {
     );
   }
 }
+
+class EmotionEntry {
+  const EmotionEntry({
+    required this.id,
+    required this.userId,
+    required this.fullName,
+    required this.age,
+    required this.messageText,
+    required this.emotionLabel,
+    required this.emotionScore,
+    required this.riskLevel,
+    required this.alertSent,
+    required this.detectedKeywords,
+    required this.createdAt,
+  });
+
+  final int id;
+  final int userId;
+  final String fullName;
+  final int age;
+  final String messageText;
+  final String emotionLabel;
+  final int emotionScore;
+  final String riskLevel;
+  final bool alertSent;
+  final List<String> detectedKeywords;
+  final String createdAt;
+
+  factory EmotionEntry.fromJson(Map<String, dynamic> json) {
+    return EmotionEntry(
+      id: json['id'] as int? ?? 0,
+      userId: json['user_id'] as int? ?? 0,
+      fullName: json['full_name'] as String? ?? '',
+      age: json['age'] as int? ?? 0,
+      messageText: json['message_text'] as String? ?? '',
+      emotionLabel: json['emotion_label'] as String? ?? '',
+      emotionScore: json['emotion_score'] as int? ?? 100,
+      riskLevel: json['risk_level'] as String? ?? 'stable',
+      alertSent: json['alert_sent'] as bool? ?? false,
+      detectedKeywords: (json['detected_keywords'] as List<dynamic>? ?? const [])
+          .map((item) => '$item')
+          .toList(),
+      createdAt: json['created_at'] as String? ?? '',
+    );
+  }
+}
+
+class EmotionTrendPoint {
+  const EmotionTrendPoint({
+    required this.date,
+    required this.averageScore,
+    required this.entryCount,
+  });
+
+  final String date;
+  final int averageScore;
+  final int entryCount;
+
+  factory EmotionTrendPoint.fromJson(Map<String, dynamic> json) {
+    return EmotionTrendPoint(
+      date: json['date'] as String? ?? '',
+      averageScore: json['average_score'] as int? ?? 100,
+      entryCount: json['entry_count'] as int? ?? 0,
+    );
+  }
+}
+
+class EmotionMemberSummary {
+  const EmotionMemberSummary({
+    required this.userId,
+    required this.fullName,
+    required this.age,
+    required this.careRoleKey,
+    required this.careRoleLabel,
+    required this.latestScore,
+    required this.latestLabel,
+    required this.latestRiskLevel,
+    required this.latestMessage,
+    required this.latestCreatedAt,
+    required this.averageScore7d,
+    required this.recentEntries,
+    required this.trend,
+  });
+
+  final int userId;
+  final String fullName;
+  final int age;
+  final String careRoleKey;
+  final String careRoleLabel;
+  final int latestScore;
+  final String latestLabel;
+  final String latestRiskLevel;
+  final String latestMessage;
+  final String? latestCreatedAt;
+  final int averageScore7d;
+  final List<EmotionEntry> recentEntries;
+  final List<EmotionTrendPoint> trend;
+
+  factory EmotionMemberSummary.fromJson(Map<String, dynamic> json) {
+    return EmotionMemberSummary(
+      userId: json['user_id'] as int? ?? 0,
+      fullName: json['full_name'] as String? ?? '',
+      age: json['age'] as int? ?? 0,
+      careRoleKey: json['care_role_key'] as String? ?? '',
+      careRoleLabel: json['care_role_label'] as String? ?? '',
+      latestScore: json['latest_score'] as int? ?? 100,
+      latestLabel: json['latest_label'] as String? ?? '',
+      latestRiskLevel: json['latest_risk_level'] as String? ?? 'stable',
+      latestMessage: json['latest_message'] as String? ?? '',
+      latestCreatedAt: json['latest_created_at'] as String?,
+      averageScore7d: json['average_score_7d'] as int? ?? 100,
+      recentEntries: (json['recent_entries'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(EmotionEntry.fromJson)
+          .toList(),
+      trend: (json['trend'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(EmotionTrendPoint.fromJson)
+          .toList(),
+    );
+  }
+}
+
+class EmotionDashboardSummary {
+  const EmotionDashboardSummary({
+    required this.elderCount,
+    required this.averageScore,
+    required this.criticalCount,
+    required this.warningCount,
+    required this.stableCount,
+  });
+
+  final int elderCount;
+  final int averageScore;
+  final int criticalCount;
+  final int warningCount;
+  final int stableCount;
+
+  factory EmotionDashboardSummary.fromJson(Map<String, dynamic> json) {
+    return EmotionDashboardSummary(
+      elderCount: json['elder_count'] as int? ?? 0,
+      averageScore: json['average_score'] as int? ?? 100,
+      criticalCount: json['critical_count'] as int? ?? 0,
+      warningCount: json['warning_count'] as int? ?? 0,
+      stableCount: json['stable_count'] as int? ?? 0,
+    );
+  }
+}
+
+class EmotionDashboard {
+  const EmotionDashboard({
+    required this.familyGroupId,
+    required this.generatedAt,
+    required this.summary,
+    required this.elders,
+  });
+
+  final int familyGroupId;
+  final String generatedAt;
+  final EmotionDashboardSummary summary;
+  final List<EmotionMemberSummary> elders;
+
+  factory EmotionDashboard.fromJson(Map<String, dynamic> json) {
+    return EmotionDashboard(
+      familyGroupId: json['family_group_id'] as int? ?? 0,
+      generatedAt: json['generated_at'] as String? ?? '',
+      summary: EmotionDashboardSummary.fromJson(
+        json['summary'] as Map<String, dynamic>? ?? const {},
+      ),
+      elders: (json['elders'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(EmotionMemberSummary.fromJson)
+          .toList(),
+    );
+  }
+}
+
+class FamilyChatMessage {
+  const FamilyChatMessage({
+    required this.id,
+    required this.familyGroupId,
+    required this.senderUserId,
+    required this.senderFullName,
+    required this.recipientUserId,
+    required this.recipientFullName,
+    required this.messageText,
+    required this.readAt,
+    required this.createdAt,
+  });
+
+  final int id;
+  final int familyGroupId;
+  final int senderUserId;
+  final String senderFullName;
+  final int recipientUserId;
+  final String recipientFullName;
+  final String messageText;
+  final String? readAt;
+  final String createdAt;
+
+  bool isFromUser(int userId) => senderUserId == userId;
+
+  factory FamilyChatMessage.fromJson(Map<String, dynamic> json) {
+    return FamilyChatMessage(
+      id: json['id'] as int? ?? 0,
+      familyGroupId: json['family_group_id'] as int? ?? 0,
+      senderUserId: json['sender_user_id'] as int? ?? 0,
+      senderFullName: json['sender_full_name'] as String? ?? '',
+      recipientUserId: json['recipient_user_id'] as int? ?? 0,
+      recipientFullName: json['recipient_full_name'] as String? ?? '',
+      messageText: json['message_text'] as String? ?? '',
+      readAt: json['read_at'] as String?,
+      createdAt: json['created_at'] as String? ?? '',
+    );
+  }
+}
+
+class FamilyChatThread {
+  const FamilyChatThread({
+    required this.partnerUserId,
+    required this.partnerFullName,
+    required this.partnerRole,
+    required this.lastMessage,
+    required this.unreadCount,
+  });
+
+  final int partnerUserId;
+  final String partnerFullName;
+  final String partnerRole;
+  final FamilyChatMessage? lastMessage;
+  final int unreadCount;
+
+  factory FamilyChatThread.fromJson(Map<String, dynamic> json) {
+    return FamilyChatThread(
+      partnerUserId: json['partner_user_id'] as int? ?? 0,
+      partnerFullName: json['partner_full_name'] as String? ?? '',
+      partnerRole: json['partner_role'] as String? ?? '',
+      lastMessage: json['last_message'] is Map<String, dynamic>
+          ? FamilyChatMessage.fromJson(
+              json['last_message'] as Map<String, dynamic>,
+            )
+          : null,
+      unreadCount: json['unread_count'] as int? ?? 0,
+    );
+  }
+}

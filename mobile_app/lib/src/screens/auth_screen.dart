@@ -40,13 +40,36 @@ class _AuthScreenState extends State<AuthScreen> {
     final controller = context.watch<AppController>();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Dang nhap v2')),
+      appBar: AppBar(title: const Text('Icare dang nhap')),
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(20),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.amber.shade100,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.amber.shade700),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Ban build moi',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 4),
+                    SelectableText(
+                      '${AppConfig.releaseLabel} | ${AppConfig.baseUrl}',
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
               Text(
                 isRegister
                     ? 'Tao tai khoan cho app mobile'

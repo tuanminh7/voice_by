@@ -48,6 +48,10 @@ CALL_MAX_TARGETS = int(os.getenv("CALL_MAX_TARGETS", "3"))
 FIREBASE_SERVICE_ACCOUNT_JSON = (os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "") or "").strip()
 ANDROID_APP_DOWNLOAD_URL = (os.getenv("ANDROID_APP_DOWNLOAD_URL", "") or "").strip()
 ANDROID_APK_STATIC_PATH = BASE_DIR / "static" / "downloads" / "ut-nguyen-android-release.apk"
+ELDER_MIN_AGE = int(os.getenv("ELDER_MIN_AGE", "60"))
+EMOTION_ALERT_THRESHOLD = int(os.getenv("EMOTION_ALERT_THRESHOLD", "45"))
+EMOTION_CRITICAL_THRESHOLD = int(os.getenv("EMOTION_CRITICAL_THRESHOLD", "25"))
+EMOTION_ALERT_COOLDOWN_MINUTES = int(os.getenv("EMOTION_ALERT_COOLDOWN_MINUTES", "180"))
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
@@ -210,6 +214,35 @@ def init_db() -> None:
         updated_at TEXT NOT NULL,
         UNIQUE(user_id, device_id, push_token),
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS emotion_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        family_group_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        message_text TEXT NOT NULL,
+        emotion_label TEXT NOT NULL,
+        emotion_score INTEGER NOT NULL,
+        risk_level TEXT NOT NULL,
+        alert_sent INTEGER NOT NULL DEFAULT 0,
+        detected_keywords TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(family_group_id) REFERENCES family_groups(id) ON DELETE CASCADE,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS family_chat_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        family_group_id INTEGER NOT NULL,
+        sender_user_id INTEGER NOT NULL,
+        recipient_user_id INTEGER NOT NULL,
+        message_text TEXT NOT NULL,
+        read_at TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(family_group_id) REFERENCES family_groups(id) ON DELETE CASCADE,
+        FOREIGN KEY(sender_user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY(recipient_user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS family_relationships (
@@ -1048,6 +1081,61 @@ def register_device_push_token():
     return jsonify({"message": "Đã lưu push token cho thiết bị.", "provider": CALL_PROVIDER})
 
 
+@app.route("/api/emotions/dashboard", methods=["GET"])
+@pin_required
+def get_emotion_dashboard():
+    membership = get_active_family_membership(g.current_user["id"])
+    if not membership:
+        return json_error("Bạn chưa thuộc nhóm gia đình nào.", 404, "family_not_found")
+    if membership["role"] != "admin":
+        return json_error("Chỉ admin mới được xem bảng giám sát cảm xúc.", 403, "not_family_admin")
+
+    return jsonify({"dashboard": build_emotion_dashboard_payload(g.current_user["id"])})
+
+
+@app.route("/api/family-chat/threads", methods=["GET"])
+@pin_required
+def get_family_chat_threads():
+    return jsonify({"threads": list_family_chat_threads(g.current_user["id"])})
+
+
+@app.route("/api/family-chat/messages", methods=["GET"])
+@pin_required
+def get_family_chat_messages():
+    partner_user_id_raw = (request.args.get("partner_user_id") or "").strip()
+    if not partner_user_id_raw.isdigit():
+        return json_error("Thiếu người nhận hội thoại.", 400, "invalid_partner_user_id")
+
+    partner_user_id = int(partner_user_id_raw)
+    rows = list_family_chat_messages(g.current_user["id"], partner_user_id)
+    if rows is None:
+        return json_error("Người này không thuộc cùng gia đình.", 404, "chat_partner_not_found")
+    return jsonify({"messages": rows, "partner_user_id": partner_user_id})
+
+
+@app.route("/api/family-chat/messages", methods=["POST"])
+@pin_required
+def send_family_chat_message():
+    payload = require_json()
+    recipient_user_id_raw = str(payload.get("recipient_user_id") or "").strip()
+    message_text = (payload.get("message_text") or "").strip()
+
+    if not recipient_user_id_raw.isdigit():
+        return json_error("Thiếu người nhận tin nhắn.", 400, "invalid_recipient_user_id")
+    if not message_text:
+        return json_error("Tin nhắn không được để trống.", 400, "invalid_message_text")
+
+    message_payload = create_family_chat_message(
+        g.current_user["id"],
+        int(recipient_user_id_raw),
+        message_text,
+    )
+    if message_payload is None:
+        return json_error("Không thể nhắn tin cho người này trong gia đình.", 404, "chat_partner_not_found")
+
+    return jsonify({"message": "Đã gửi tin nhắn.", "chat_message": message_payload})
+
+
 @app.route("/api/call-relationships", methods=["GET"])
 @pin_required
 def get_call_relationships():
@@ -1354,7 +1442,8 @@ def chat():
         return jsonify({"error": "Thiếu nội dung tin nhắn."}), 400
 
     reply = generate_reply(user_text, get_history())
-    return jsonify({"reply": reply})
+    emotion_signal = maybe_log_emotion_signal(g.current_user, user_text, source="assistant_chat")
+    return jsonify({"reply": reply, "emotion_signal": emotion_signal})
 
 
 @app.route("/chat_stream", methods=["POST"])
@@ -1399,6 +1488,7 @@ def chat_stream():
             full_text = "Dạ, tôi tạm thời chưa tạo được nội dung phản hồi."
 
         remember_turn(history, user_text, full_text.strip())
+        maybe_log_emotion_signal(g.current_user, user_text, source="assistant_chat")
 
     return Response(generate(), mimetype="text/plain; charset=utf-8")
 
@@ -1949,6 +2039,42 @@ def build_supported_relationships_payload() -> list[dict]:
     return [{"key": key, "label": label} for key, label in RELATIONSHIP_LABELS.items()]
 
 
+ELDER_RELATIONSHIP_KEYS = {"grandfather", "grandmother"}
+EMOTION_KEYWORD_WEIGHTS = {
+    "buon": 18,
+    "chan": 15,
+    "co don": 24,
+    "tuyet vong": 35,
+    "met moi": 12,
+    "lo lang": 14,
+    "so hai": 14,
+    "that vong": 18,
+    "khoc": 18,
+    "toi te": 18,
+    "bat luc": 20,
+    "tui than": 20,
+    "tram": 20,
+    "khong ai quan tam": 28,
+    "khong co ai": 22,
+    "vo nghia": 28,
+}
+EMOTION_CRITICAL_PATTERNS = {
+    "muon chet": 80,
+    "khong muon song": 85,
+    "chan song": 70,
+    "khong muon tiep tuc": 65,
+    "muon bien mat": 70,
+}
+EMOTION_POSITIVE_KEYWORDS = {
+    "vui": 10,
+    "on": 6,
+    "tot": 6,
+    "hanh phuc": 12,
+    "yen tam": 10,
+    "thoai mai": 10,
+}
+
+
 RELATIONSHIP_LABELS = {
     "son": "con trai",
     "daughter": "con gái",
@@ -2017,6 +2143,512 @@ def simplify_text(value: str) -> str:
 def normalize_relationship_key(value: str) -> str:
     simplified = simplify_text(value)
     return RELATIONSHIP_ALIASES.get(simplified, simplified)
+
+
+def analyze_emotion_signal(message_text: str) -> dict:
+    simplified = simplify_text(message_text)
+    score = 100
+    detected_keywords: list[str] = []
+
+    for phrase, penalty in EMOTION_CRITICAL_PATTERNS.items():
+        if phrase in simplified:
+            score -= penalty
+            detected_keywords.append(phrase)
+
+    for phrase, penalty in EMOTION_KEYWORD_WEIGHTS.items():
+        if phrase in simplified:
+            score -= penalty
+            detected_keywords.append(phrase)
+
+    for phrase, bonus in EMOTION_POSITIVE_KEYWORDS.items():
+        if phrase in simplified:
+            score += bonus
+
+    score = max(0, min(100, score))
+
+    if score <= EMOTION_CRITICAL_THRESHOLD:
+        return {
+            "emotion_label": "rat_buon",
+            "risk_level": "critical",
+            "emotion_score": score,
+            "detected_keywords": detected_keywords,
+        }
+    if score <= EMOTION_ALERT_THRESHOLD:
+        return {
+            "emotion_label": "buon_chan",
+            "risk_level": "warning",
+            "emotion_score": score,
+            "detected_keywords": detected_keywords,
+        }
+    if score <= 70:
+        return {
+            "emotion_label": "giam_nhe",
+            "risk_level": "watch",
+            "emotion_score": score,
+            "detected_keywords": detected_keywords,
+        }
+
+    return {
+        "emotion_label": "on_dinh",
+        "risk_level": "stable",
+        "emotion_score": score,
+        "detected_keywords": detected_keywords,
+    }
+
+
+def fetch_monitored_elders(family_group_id: int) -> list[sqlite3.Row]:
+    return fetch_all(
+        """
+        SELECT DISTINCT
+            fm.user_id,
+            u.full_name,
+            u.age,
+            u.email,
+            u.phone_number,
+            CASE
+                WHEN EXISTS(
+                    SELECT 1
+                    FROM family_relationships fr
+                    WHERE fr.family_group_id = fm.family_group_id
+                      AND fr.relative_user_id = fm.user_id
+                      AND fr.is_active = 1
+                      AND fr.relationship_key = 'grandfather'
+                ) THEN 'ong'
+                WHEN EXISTS(
+                    SELECT 1
+                    FROM family_relationships fr
+                    WHERE fr.family_group_id = fm.family_group_id
+                      AND fr.relative_user_id = fm.user_id
+                      AND fr.is_active = 1
+                      AND fr.relationship_key = 'grandmother'
+                ) THEN 'ba'
+                ELSE 'nguoi_cao_tuoi'
+            END AS care_role_key
+        FROM family_members fm
+        JOIN users u ON u.id = fm.user_id
+        WHERE fm.family_group_id = ?
+          AND fm.status = 'active'
+          AND (
+              u.age >= ?
+              OR EXISTS(
+                    SELECT 1
+                    FROM family_relationships fr
+                    WHERE fr.family_group_id = fm.family_group_id
+                      AND fr.relative_user_id = fm.user_id
+                      AND fr.is_active = 1
+                      AND fr.relationship_key IN ('grandfather', 'grandmother')
+                )
+          )
+        ORDER BY u.age DESC, u.full_name COLLATE NOCASE ASC
+        """,
+        (family_group_id, ELDER_MIN_AGE),
+    )
+
+
+def is_monitored_elder(user_id: int, family_group_id: int) -> bool:
+    return any(row["user_id"] == user_id for row in fetch_monitored_elders(family_group_id))
+
+
+def emotion_role_label(care_role_key: str) -> str:
+    return {
+        "ong": "Ông",
+        "ba": "Bà",
+        "nguoi_cao_tuoi": "Người cao tuổi",
+    }.get(care_role_key, "Người được theo dõi")
+
+
+def get_family_admin_user_ids(family_group_id: int, *, exclude_user_id: int | None = None) -> list[int]:
+    rows = fetch_all(
+        """
+        SELECT user_id
+        FROM family_members
+        WHERE family_group_id = ? AND status = 'active' AND role = 'admin'
+        ORDER BY id ASC
+        """,
+        (family_group_id,),
+    )
+    user_ids = [row["user_id"] for row in rows]
+    if exclude_user_id is not None:
+        user_ids = [user_id for user_id in user_ids if user_id != exclude_user_id]
+    return user_ids
+
+
+def has_recent_emotion_alert(user_id: int) -> bool:
+    threshold = (utcnow() - timedelta(minutes=EMOTION_ALERT_COOLDOWN_MINUTES)).isoformat(timespec="seconds")
+    row = fetch_one(
+        """
+        SELECT id
+        FROM emotion_logs
+        WHERE user_id = ? AND alert_sent = 1 AND created_at >= ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (user_id, threshold),
+    )
+    return row is not None
+
+
+def maybe_log_emotion_signal(user_row: sqlite3.Row | None, message_text: str, *, source: str = "assistant_chat") -> dict | None:
+    if user_row is None or not message_text.strip():
+        return None
+
+    membership = get_active_family_membership(user_row["id"])
+    if not membership:
+        return None
+    if not is_monitored_elder(user_row["id"], membership["family_group_id"]):
+        return None
+
+    analysis = analyze_emotion_signal(message_text)
+    now = utcnow_iso()
+    cursor = get_db().execute(
+        """
+        INSERT INTO emotion_logs (
+            family_group_id, user_id, source, message_text, emotion_label,
+            emotion_score, risk_level, alert_sent, detected_keywords, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        """,
+        (
+            membership["family_group_id"],
+            user_row["id"],
+            source,
+            message_text.strip(),
+            analysis["emotion_label"],
+            analysis["emotion_score"],
+            analysis["risk_level"],
+            ", ".join(analysis["detected_keywords"]),
+            now,
+        ),
+    )
+    emotion_log_id = cursor.lastrowid
+
+    should_alert = analysis["emotion_score"] <= EMOTION_ALERT_THRESHOLD and not has_recent_emotion_alert(user_row["id"])
+    if should_alert:
+        admin_user_ids = get_family_admin_user_ids(
+            membership["family_group_id"],
+            exclude_user_id=user_row["id"],
+        )
+        for admin_user_id in admin_user_ids:
+            send_push_notification(
+                target_user_id=admin_user_id,
+                title="Icare canh bao cam xuc",
+                body=(
+                    f"{user_row['full_name']} dang co dau hieu buon/chan. "
+                    f"Diem cam xuc hien tai: {analysis['emotion_score']}/100."
+                ),
+                data={
+                    "event_type": "emotion_alert",
+                    "emotion_log_id": emotion_log_id,
+                    "user_id": user_row["id"],
+                    "emotion_score": analysis["emotion_score"],
+                    "risk_level": analysis["risk_level"],
+                },
+            )
+
+        get_db().execute(
+            "UPDATE emotion_logs SET alert_sent = 1 WHERE id = ?",
+            (emotion_log_id,),
+        )
+
+    get_db().commit()
+    return {
+        **analysis,
+        "emotion_log_id": emotion_log_id,
+        "alert_sent": should_alert,
+        "created_at": now,
+    }
+
+
+def serialize_emotion_log(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "full_name": row["full_name"],
+        "age": row["age"],
+        "message_text": row["message_text"],
+        "emotion_label": row["emotion_label"],
+        "emotion_score": row["emotion_score"],
+        "risk_level": row["risk_level"],
+        "alert_sent": bool(row["alert_sent"]),
+        "detected_keywords": split_alias_input(row["detected_keywords"]),
+        "created_at": row["created_at"],
+    }
+
+
+def fetch_recent_emotion_logs_for_user(user_id: int, limit: int = 6) -> list[dict]:
+    rows = fetch_all(
+        """
+        SELECT el.*, u.full_name, u.age
+        FROM emotion_logs el
+        JOIN users u ON u.id = el.user_id
+        WHERE el.user_id = ?
+        ORDER BY el.created_at DESC, el.id DESC
+        LIMIT ?
+        """,
+        (user_id, limit),
+    )
+    return [serialize_emotion_log(row) for row in rows]
+
+
+def build_emotion_trend(user_id: int, days: int = 7) -> list[dict]:
+    threshold = (utcnow() - timedelta(days=days - 1)).date().isoformat()
+    rows = fetch_all(
+        """
+        SELECT substr(created_at, 1, 10) AS day, AVG(emotion_score) AS avg_score, COUNT(*) AS total
+        FROM emotion_logs
+        WHERE user_id = ? AND substr(created_at, 1, 10) >= ?
+        GROUP BY substr(created_at, 1, 10)
+        ORDER BY day ASC
+        """,
+        (user_id, threshold),
+    )
+    return [
+        {
+            "date": row["day"],
+            "average_score": int(round(row["avg_score"] or 0)),
+            "entry_count": row["total"],
+        }
+        for row in rows
+    ]
+
+
+def build_emotion_dashboard_payload(user_id: int) -> dict | None:
+    membership = get_active_family_membership(user_id)
+    if not membership:
+        return None
+
+    elder_rows = fetch_monitored_elders(membership["family_group_id"])
+    elders_payload: list[dict] = []
+    average_scores: list[int] = []
+    critical_count = 0
+    warning_count = 0
+
+    for elder_row in elder_rows:
+        recent_entries = fetch_recent_emotion_logs_for_user(elder_row["user_id"])
+        latest_entry = recent_entries[0] if recent_entries else None
+        trend = build_emotion_trend(elder_row["user_id"])
+        avg_score = (
+            int(round(sum(entry["emotion_score"] for entry in recent_entries) / len(recent_entries)))
+            if recent_entries
+            else 100
+        )
+        average_scores.append(avg_score)
+        if latest_entry and latest_entry["risk_level"] == "critical":
+            critical_count += 1
+        elif latest_entry and latest_entry["risk_level"] in {"warning", "watch"}:
+            warning_count += 1
+
+        elders_payload.append(
+            {
+                "user_id": elder_row["user_id"],
+                "full_name": elder_row["full_name"],
+                "age": elder_row["age"],
+                "care_role_key": elder_row["care_role_key"],
+                "care_role_label": emotion_role_label(elder_row["care_role_key"]),
+                "latest_score": latest_entry["emotion_score"] if latest_entry else 100,
+                "latest_label": latest_entry["emotion_label"] if latest_entry else "on_dinh",
+                "latest_risk_level": latest_entry["risk_level"] if latest_entry else "stable",
+                "latest_message": latest_entry["message_text"] if latest_entry else "",
+                "latest_created_at": latest_entry["created_at"] if latest_entry else None,
+                "recent_entries": recent_entries,
+                "trend": trend,
+                "average_score_7d": avg_score,
+            }
+        )
+
+    return {
+        "family_group_id": membership["family_group_id"],
+        "generated_at": utcnow_iso(),
+        "summary": {
+            "elder_count": len(elders_payload),
+            "average_score": int(round(sum(average_scores) / len(average_scores))) if average_scores else 100,
+            "critical_count": critical_count,
+            "warning_count": warning_count,
+            "stable_count": max(0, len(elders_payload) - critical_count - warning_count),
+        },
+        "elders": elders_payload,
+    }
+
+
+def validate_same_family_chat_membership(user_id: int, partner_user_id: int) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
+    membership = get_active_family_membership(user_id)
+    if not membership:
+        return None, None
+    partner_membership = fetch_family_membership_record(membership["family_group_id"], partner_user_id)
+    if not partner_membership:
+        return membership, None
+    return membership, partner_membership
+
+
+def serialize_family_chat_message(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "family_group_id": row["family_group_id"],
+        "sender_user_id": row["sender_user_id"],
+        "sender_full_name": row["sender_full_name"],
+        "recipient_user_id": row["recipient_user_id"],
+        "recipient_full_name": row["recipient_full_name"],
+        "message_text": row["message_text"],
+        "read_at": row["read_at"],
+        "created_at": row["created_at"],
+    }
+
+
+def list_family_chat_threads(user_id: int) -> list[dict]:
+    membership = get_active_family_membership(user_id)
+    if not membership:
+        return []
+
+    threads: list[dict] = []
+    for member in fetch_family_members(membership["family_group_id"]):
+        if member["user_id"] == user_id:
+            continue
+
+        last_message = fetch_one(
+            """
+            SELECT
+                m.*,
+                sender.full_name AS sender_full_name,
+                recipient.full_name AS recipient_full_name
+            FROM family_chat_messages m
+            JOIN users sender ON sender.id = m.sender_user_id
+            JOIN users recipient ON recipient.id = m.recipient_user_id
+            WHERE m.family_group_id = ?
+              AND (
+                    (m.sender_user_id = ? AND m.recipient_user_id = ?)
+                 OR (m.sender_user_id = ? AND m.recipient_user_id = ?)
+              )
+            ORDER BY m.created_at DESC, m.id DESC
+            LIMIT 1
+            """,
+            (
+                membership["family_group_id"],
+                user_id,
+                member["user_id"],
+                member["user_id"],
+                user_id,
+            ),
+        )
+        unread_row = fetch_one(
+            """
+            SELECT COUNT(*) AS total
+            FROM family_chat_messages
+            WHERE family_group_id = ?
+              AND sender_user_id = ?
+              AND recipient_user_id = ?
+              AND read_at IS NULL
+            """,
+            (membership["family_group_id"], member["user_id"], user_id),
+        )
+        threads.append(
+            {
+                "partner_user_id": member["user_id"],
+                "partner_full_name": member["full_name"],
+                "partner_role": member["role"],
+                "last_message": serialize_family_chat_message(last_message) if last_message else None,
+                "unread_count": unread_row["total"] if unread_row else 0,
+            }
+        )
+
+    threads.sort(
+        key=lambda item: (
+            item["last_message"]["created_at"] if item["last_message"] else "",
+            item["partner_full_name"].lower(),
+        ),
+        reverse=True,
+    )
+    return threads
+
+
+def list_family_chat_messages(user_id: int, partner_user_id: int, *, limit: int = 80) -> list[dict] | None:
+    membership, partner_membership = validate_same_family_chat_membership(user_id, partner_user_id)
+    if membership is None or partner_membership is None:
+        return None
+
+    now = utcnow_iso()
+    get_db().execute(
+        """
+        UPDATE family_chat_messages
+        SET read_at = ?
+        WHERE family_group_id = ?
+          AND sender_user_id = ?
+          AND recipient_user_id = ?
+          AND read_at IS NULL
+        """,
+        (now, membership["family_group_id"], partner_user_id, user_id),
+    )
+    get_db().commit()
+
+    rows = fetch_all(
+        """
+        SELECT
+            m.*,
+            sender.full_name AS sender_full_name,
+            recipient.full_name AS recipient_full_name
+        FROM family_chat_messages m
+        JOIN users sender ON sender.id = m.sender_user_id
+        JOIN users recipient ON recipient.id = m.recipient_user_id
+        WHERE m.family_group_id = ?
+          AND (
+                (m.sender_user_id = ? AND m.recipient_user_id = ?)
+             OR (m.sender_user_id = ? AND m.recipient_user_id = ?)
+          )
+        ORDER BY m.created_at ASC, m.id ASC
+        LIMIT ?
+        """,
+        (
+            membership["family_group_id"],
+            user_id,
+            partner_user_id,
+            partner_user_id,
+            user_id,
+            limit,
+        ),
+    )
+    return [serialize_family_chat_message(row) for row in rows]
+
+
+def create_family_chat_message(sender_user_id: int, recipient_user_id: int, message_text: str) -> dict | None:
+    membership, partner_membership = validate_same_family_chat_membership(sender_user_id, recipient_user_id)
+    if membership is None or partner_membership is None:
+        return None
+
+    sender = fetch_user_by_id(sender_user_id)
+    recipient = fetch_user_by_id(recipient_user_id)
+    now = utcnow_iso()
+    cursor = get_db().execute(
+        """
+        INSERT INTO family_chat_messages (
+            family_group_id, sender_user_id, recipient_user_id, message_text, created_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (membership["family_group_id"], sender_user_id, recipient_user_id, message_text.strip(), now),
+    )
+    get_db().commit()
+
+    payload = {
+        "id": cursor.lastrowid,
+        "family_group_id": membership["family_group_id"],
+        "sender_user_id": sender_user_id,
+        "sender_full_name": sender["full_name"] if sender else "Nguoi nha",
+        "recipient_user_id": recipient_user_id,
+        "recipient_full_name": recipient["full_name"] if recipient else "Nguoi nha",
+        "message_text": message_text.strip(),
+        "read_at": None,
+        "created_at": now,
+    }
+
+    send_push_notification(
+        target_user_id=recipient_user_id,
+        title="Icare co tin nhan moi",
+        body=f"{payload['sender_full_name']}: {payload['message_text'][:80]}",
+        data={
+            "event_type": "family_chat_message",
+            "message_id": payload["id"],
+            "sender_user_id": sender_user_id,
+            "recipient_user_id": recipient_user_id,
+        },
+    )
+    return payload
 
 
 def split_alias_input(value: str) -> list[str]:

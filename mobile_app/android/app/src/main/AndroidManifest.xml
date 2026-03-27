@@ -6,7 +6,7 @@
     <uses-permission android:name="android.permission.VIBRATE" />
 
     <application
-        android:label="ut_nguyen_mobile"
+        android:label="Icare"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

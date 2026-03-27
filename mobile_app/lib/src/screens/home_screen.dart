@@ -15,6 +15,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _speech = SpeechToText();
   final _transcript = TextEditingController();
+  final _chatComposer = TextEditingController();
   final _pushToken = TextEditingController();
   final _priorityOrder = TextEditingController(text: '1');
   String? _selectedRelationshipKey;
@@ -35,6 +36,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _transcript.dispose();
+    _chatComposer.dispose();
     _pushToken.dispose();
     _priorityOrder.dispose();
     super.dispose();
@@ -99,6 +101,10 @@ class _HomeScreenState extends State<HomeScreen> {
     final profile = controller.profile;
     final family = controller.family;
     final options = controller.relationshipOptions;
+    final emotionDashboard = controller.emotionDashboard;
+    final chatThreads = controller.chatThreads;
+    final activeChatThread = controller.activeChatThread;
+    final activeChatMessages = controller.activeChatMessages;
 
     final familyMembers = (family?.members ?? const <FamilyMember>[])
         .where((member) => member.userId != profile?.id)
@@ -108,7 +114,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Emergency Call V2'),
+        title: const Text('Icare'),
         actions: [
           IconButton(
             onPressed: controller.busy ? null : controller.logout,
@@ -148,6 +154,29 @@ class _HomeScreenState extends State<HomeScreen> {
                 invitationId: invitationId,
                 action: 'decline',
               ),
+            ),
+            const SizedBox(height: 20),
+            _EmotionDashboardCard(
+              dashboard: emotionDashboard,
+              isAdmin: family?.role == 'admin',
+            ),
+            const SizedBox(height: 20),
+            _FamilyChatCard(
+              currentUserId: profile?.id,
+              threads: chatThreads,
+              activeThread: activeChatThread,
+              messages: activeChatMessages,
+              composer: _chatComposer,
+              busy: controller.busy,
+              onSelectThread: controller.openChatThread,
+              onSend: () async {
+                final text = _chatComposer.text.trim();
+                if (text.isEmpty) {
+                  return;
+                }
+                await controller.sendChatMessage(text);
+                _chatComposer.clear();
+              },
             ),
             const SizedBox(height: 20),
             _ActiveCallCard(
@@ -438,6 +467,399 @@ class _InvitationCard extends StatelessWidget {
 
   String _formatTimestamp(String value) {
     return value.replaceFirst('T', ' ').split('.').first;
+  }
+}
+
+class _EmotionDashboardCard extends StatelessWidget {
+  const _EmotionDashboardCard({
+    required this.dashboard,
+    required this.isAdmin,
+  });
+
+  final EmotionDashboard? dashboard;
+  final bool isAdmin;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    if (!isAdmin) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Giam sat cam xuc', style: theme.textTheme.titleLarge),
+              const SizedBox(height: 8),
+              const Text(
+                'Trang nay danh cho admin trong gia dinh de theo doi cam xuc cua ong, ba va nguoi cao tuoi.',
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (dashboard == null) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Giam sat cam xuc', style: theme.textTheme.titleLarge),
+              const SizedBox(height: 8),
+              const Text(
+                'Chua co du lieu cam xuc nao tu cac cuoc tro chuyen gan day.',
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Trung tam giam sat cam xuc', style: theme.textTheme.titleLarge),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                _MetricBadge(
+                  label: 'Nguoi duoc theo doi',
+                  value: '${dashboard!.summary.elderCount}',
+                  color: const Color(0xFF1D4ED8),
+                ),
+                _MetricBadge(
+                  label: 'Diem TB',
+                  value: '${dashboard!.summary.averageScore}/100',
+                  color: const Color(0xFF0F766E),
+                ),
+                _MetricBadge(
+                  label: 'Canh bao cao',
+                  value: '${dashboard!.summary.criticalCount}',
+                  color: const Color(0xFFB91C1C),
+                ),
+                _MetricBadge(
+                  label: 'Can theo doi',
+                  value: '${dashboard!.summary.warningCount}',
+                  color: const Color(0xFFD97706),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            ...dashboard!.elders.map(
+              (elder) => Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade50,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.grey.shade300),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '${elder.careRoleLabel}: ${elder.fullName}',
+                              style: theme.textTheme.titleMedium,
+                            ),
+                          ),
+                          Text(
+                            '${elder.latestScore}/100',
+                            style: theme.textTheme.titleMedium?.copyWith(
+                              color: _scoreColor(elder.latestScore),
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text('Tuoi ${elder.age} | Trung binh 7 ngay: ${elder.averageScore7d}/100'),
+                      const SizedBox(height: 10),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(999),
+                        child: LinearProgressIndicator(
+                          value: elder.latestScore / 100,
+                          minHeight: 10,
+                          backgroundColor: Colors.grey.shade200,
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            _scoreColor(elder.latestScore),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      if (elder.latestMessage.isNotEmpty)
+                        Text(
+                          'Tin nhan gan nhat: "${elder.latestMessage}"',
+                          style: theme.textTheme.bodyMedium,
+                        ),
+                      if (elder.trend.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          height: 72,
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: elder.trend
+                                .map(
+                                  (point) => Expanded(
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 3),
+                                      child: Column(
+                                        mainAxisAlignment: MainAxisAlignment.end,
+                                        children: [
+                                          Text(
+                                            '${point.averageScore}',
+                                            style: theme.textTheme.bodySmall,
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Container(
+                                            height: point.averageScore <= 0
+                                                ? 4
+                                                : (point.averageScore * 0.42).clamp(10, 56).toDouble(),
+                                            decoration: BoxDecoration(
+                                              color: _scoreColor(point.averageScore),
+                                              borderRadius: BorderRadius.circular(8),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            point.date.length >= 10
+                                                ? point.date.substring(5)
+                                                : point.date,
+                                            style: theme.textTheme.bodySmall,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                        ),
+                      ],
+                      if (elder.recentEntries.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        ...elder.recentEntries.take(3).map(
+                          (entry) => Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: Text(
+                              '- ${entry.createdAt.replaceFirst('T', ' ')} | ${entry.emotionScore}/100 | ${entry.messageText}',
+                              style: theme.textTheme.bodySmall,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Color _scoreColor(int score) {
+    if (score <= 25) {
+      return const Color(0xFFB91C1C);
+    }
+    if (score <= 45) {
+      return const Color(0xFFD97706);
+    }
+    if (score <= 70) {
+      return const Color(0xFFCA8A04);
+    }
+    return const Color(0xFF15803D);
+  }
+}
+
+class _MetricBadge extends StatelessWidget {
+  const _MetricBadge({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: Theme.of(context).textTheme.bodySmall),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: color,
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FamilyChatCard extends StatelessWidget {
+  const _FamilyChatCard({
+    required this.currentUserId,
+    required this.threads,
+    required this.activeThread,
+    required this.messages,
+    required this.composer,
+    required this.busy,
+    required this.onSelectThread,
+    required this.onSend,
+  });
+
+  final int? currentUserId;
+  final List<FamilyChatThread> threads;
+  final FamilyChatThread? activeThread;
+  final List<FamilyChatMessage> messages;
+  final TextEditingController composer;
+  final bool busy;
+  final ValueChanged<int> onSelectThread;
+  final Future<void> Function() onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Tin nhan gia dinh', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 8),
+            if (threads.isEmpty)
+              const Text('Chua co thanh vien nao de bat dau hoi thoai.')
+            else ...[
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: threads
+                    .map(
+                      (thread) => ChoiceChip(
+                        label: Text(
+                          thread.unreadCount > 0
+                              ? '${thread.partnerFullName} (${thread.unreadCount})'
+                              : thread.partnerFullName,
+                        ),
+                        selected: activeThread?.partnerUserId == thread.partnerUserId,
+                        onSelected: busy ? null : (_) => onSelectThread(thread.partnerUserId),
+                      ),
+                    )
+                    .toList(),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                constraints: const BoxConstraints(minHeight: 120, maxHeight: 280),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade50,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.grey.shade300),
+                ),
+                child: messages.isEmpty
+                    ? const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text('Hay gui loi hoi tham dau tien cho nguoi than.'),
+                      )
+                    : ListView.builder(
+                        itemCount: messages.length,
+                        itemBuilder: (context, index) {
+                          final message = messages[index];
+                          final isMine = currentUserId != null &&
+                              message.isFromUser(currentUserId!);
+                          return Align(
+                            alignment:
+                                isMine ? Alignment.centerRight : Alignment.centerLeft,
+                            child: Container(
+                              margin: const EdgeInsets.only(bottom: 10),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 10,
+                              ),
+                              constraints: const BoxConstraints(maxWidth: 280),
+                              decoration: BoxDecoration(
+                                color: isMine
+                                    ? const Color(0xFFDCEBFF)
+                                    : Colors.white,
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(color: Colors.grey.shade300),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    message.senderFullName,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodySmall
+                                        ?.copyWith(fontWeight: FontWeight.w700),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(message.messageText),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: composer,
+                      minLines: 1,
+                      maxLines: 3,
+                      decoration: InputDecoration(
+                        labelText: activeThread == null
+                            ? 'Chon nguoi than de nhan tin'
+                            : 'Nhan tin cho ${activeThread!.partnerFullName}',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  FilledButton(
+                    onPressed: busy || activeThread == null
+                        ? null
+                        : () async {
+                            await onSend();
+                          },
+                    child: const Text('Gui'),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 }
 

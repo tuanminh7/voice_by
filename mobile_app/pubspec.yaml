@@ -2,7 +2,7 @@ name: ut_nguyen_mobile
 description: Mobile app v2 for emergency voice calling with Flutter, Flask and ZEGOCLOUD.
 publish_to: "none"
 
-version: 0.1.0+1
+version: 0.1.1+2
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

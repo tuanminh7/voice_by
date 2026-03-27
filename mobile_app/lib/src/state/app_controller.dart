@@ -41,6 +41,10 @@ class AppController extends ChangeNotifier {
   List<FamilyInvitation> pendingInvitations = const [];
   List<FamilyRelationship> relationships = const [];
   List<RelationshipOption> relationshipOptions = const [];
+  EmotionDashboard? emotionDashboard;
+  List<FamilyChatThread> chatThreads = const [];
+  List<FamilyChatMessage> activeChatMessages = const [];
+  int? activeChatPartnerUserId;
   List<CallSession> callHistory = const [];
   CallSession? activeCall;
   String? errorMessage;
@@ -54,6 +58,18 @@ class AppController extends ChangeNotifier {
   bool get hasPushMessagingConfig => _messagingService.isAvailable;
   String? get autoPushToken => _messagingService.deviceToken;
   String? get pushStatusMessage => _messagingService.availabilityMessage;
+  FamilyChatThread? get activeChatThread {
+    final partnerUserId = activeChatPartnerUserId;
+    if (partnerUserId == null) {
+      return null;
+    }
+    for (final thread in chatThreads) {
+      if (thread.partnerUserId == partnerUserId) {
+        return thread;
+      }
+    }
+    return null;
+  }
 
   static Future<AppController> create() async {
     final store = await LocalStore.create();
@@ -184,6 +200,17 @@ class AppController extends ChangeNotifier {
     pendingInvitations = results[3] as List<FamilyInvitation>;
     callHistory = results[4] as List<CallSession>;
 
+    if (family != null) {
+      emotionDashboard = await _apiService.getEmotionDashboard();
+      chatThreads = await _apiService.getFamilyChatThreads();
+      await _refreshActiveChatMessages(allowAutoSelect: true);
+    } else {
+      emotionDashboard = null;
+      chatThreads = const [];
+      activeChatMessages = const [];
+      activeChatPartnerUserId = null;
+    }
+
     await _syncRealtimeServices();
     _syncActiveCallFromHistory();
     await _consumeLaunchPushMessage();
@@ -253,6 +280,30 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  Future<void> openChatThread(int partnerUserId) async {
+    await _runBusy(() async {
+      activeChatPartnerUserId = partnerUserId;
+      await _refreshChatThreads();
+      await _refreshActiveChatMessages(allowAutoSelect: false);
+    });
+  }
+
+  Future<void> sendChatMessage(String messageText) async {
+    final partnerUserId = activeChatPartnerUserId;
+    if (partnerUserId == null) {
+      return;
+    }
+
+    await _runBusy(() async {
+      final sentMessage = await _apiService.sendFamilyChatMessage(
+        recipientUserId: partnerUserId,
+        messageText: messageText,
+      );
+      activeChatMessages = [...activeChatMessages, sentMessage];
+      await _refreshChatThreads();
+    });
+  }
+
   Future<void> refreshActiveCall() async {
     final session = activeCall;
     if (session == null) {
@@ -318,6 +369,10 @@ class AppController extends ChangeNotifier {
       pendingInvitations = const [];
       relationships = const [];
       relationshipOptions = const [];
+      emotionDashboard = null;
+      chatThreads = const [];
+      activeChatMessages = const [];
+      activeChatPartnerUserId = null;
       callHistory = const [];
       stage = AppStage.auth;
     });
@@ -417,6 +472,8 @@ class AppController extends ChangeNotifier {
         'family_invitation',
         'family_invitation_accepted',
         'family_invitation_declined',
+        'family_chat_message',
+        'emotion_alert',
       }.contains(message.eventType)) {
         await loadHomeData();
         return;
@@ -468,6 +525,37 @@ class AppController extends ChangeNotifier {
       userId: currentUser.id,
       token: token,
     );
+  }
+
+  Future<void> _refreshChatThreads() async {
+    chatThreads = await _apiService.getFamilyChatThreads();
+  }
+
+  Future<void> _refreshActiveChatMessages({
+    required bool allowAutoSelect,
+  }) async {
+    var partnerUserId = activeChatPartnerUserId;
+    if (partnerUserId == null && allowAutoSelect && chatThreads.isNotEmpty) {
+      partnerUserId = chatThreads.first.partnerUserId;
+      activeChatPartnerUserId = partnerUserId;
+    }
+
+    if (partnerUserId == null) {
+      activeChatMessages = const [];
+      return;
+    }
+
+    final threadExists = chatThreads.any(
+      (thread) => thread.partnerUserId == partnerUserId,
+    );
+    if (!threadExists) {
+      activeChatPartnerUserId = null;
+      activeChatMessages = const [];
+      return;
+    }
+
+    activeChatMessages = await _apiService.getFamilyChatMessages(partnerUserId);
+    chatThreads = await _apiService.getFamilyChatThreads();
   }
 
   Future<void> _maybeJoinAcceptedCall(CallSession? session) async {

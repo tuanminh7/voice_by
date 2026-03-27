@@ -65,7 +65,7 @@ class ZegoCallService {
           showOnFullScreen: true,
         ),
         iOSNotificationConfig: ZegoCallIOSNotificationConfig(
-          appName: 'UT Nguyen Mobile',
+          appName: 'Icare',
         ),
       ),
     );

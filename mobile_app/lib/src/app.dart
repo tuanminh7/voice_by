@@ -13,7 +13,7 @@ class EmergencyCallApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'UT Nguyen Mobile',
+      title: 'Icare',
       debugShowCheckedModeBanner: false,
       navigatorKey: AppNavigator.navigatorKey,
       theme: ThemeData(
