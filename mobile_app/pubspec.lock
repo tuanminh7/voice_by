@@ -370,12 +370,11 @@ packages:
     source: hosted
     version: "1.1.1"
   floating:
-    dependency: transitive
+    dependency: "direct overridden"
     description:
-      name: floating
-      sha256: e51ce1dbcab3ea83da0ad1b07f2091b99c0e8680184c780a000567f41234d454
-      url: "https://pub.dev"
-    source: hosted
+      path: "vendor/floating"
+      relative: true
+    source: path
     version: "6.0.0"
   flutter:
     dependency: "direct main"
@@ -425,10 +424,9 @@ packages:
   flutter_ringtone_player:
     dependency: "direct main"
     description:
-      name: flutter_ringtone_player
-      sha256: ae4a2caab2cfd14902f3ee5fe0307c454b396f0077fa34700238d6c4bd99cfec
-      url: "https://pub.dev"
-    source: hosted
+      path: "vendor/flutter_ringtone_player"
+      relative: true
+    source: path
     version: "4.0.0+4"
   flutter_test:
     dependency: "direct dev"

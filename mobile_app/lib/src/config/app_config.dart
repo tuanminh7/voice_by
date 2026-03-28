@@ -47,6 +47,14 @@ class AppConfig {
     defaultValue: '',
   );
 
+  static bool get hasRealtimeCallConfig =>
+      zegoAppId > 0 && zegoAppSign.trim().isNotEmpty;
+
+  static String get realtimeCallSetupHint =>
+      'Bản app hiện tại chưa được build kèm cấu hình gọi thoại realtime. '
+      'Hãy build lại với `--dart-define=ZEGO_APP_ID=...` và '
+      '`--dart-define=ZEGO_APP_SIGN=...`, rồi cài lại APK trước khi gọi hoặc nghe máy.';
+
   static String get backendConnectionHint {
     final suggestions = <String>[
       'Backend hien tai: $baseUrl.',

@@ -493,11 +493,17 @@ class ApiService {
     }
   }
 
-  Future<VoiceAssistantResult> submitVoiceInput(String transcriptText) async {
+  Future<VoiceAssistantResult> submitVoiceInput(
+    String transcriptText, {
+    required bool realtimeCallReady,
+  }) async {
     try {
       final response = await _dio.post<Map<String, dynamic>>(
         '/api/calls/voice-intent',
-        data: {'transcript_text': transcriptText},
+        data: {
+          'transcript_text': transcriptText,
+          'realtime_call_ready': realtimeCallReady,
+        },
       );
       return VoiceAssistantResult.fromJson(response.data ?? const {});
     } catch (error) {

@@ -30,5 +30,12 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: any
 
+dependency_overrides:
+  floating:
+    path: vendor/floating
+  flutter_ringtone_player:
+    path: vendor/flutter_ringtone_player
+
 flutter:
   uses-material-design: true
+

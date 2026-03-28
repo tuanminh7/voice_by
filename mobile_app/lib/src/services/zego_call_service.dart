@@ -17,6 +17,16 @@ class ZegoCallService {
   bool get isConfigured =>
       AppConfig.zegoAppId > 0 && AppConfig.zegoAppSign.isNotEmpty;
 
+  String? getJoinBlockReason(CallSession? session) {
+    if (!isConfigured) {
+      return AppConfig.realtimeCallSetupHint;
+    }
+    if (session == null || session.roomId.trim().isEmpty) {
+      return 'Cuộc gọi này chưa có mã phòng thoại hợp lệ nên chưa thể kết nối.';
+    }
+    return null;
+  }
+
   Future<void> initialize() async {
     ZegoUIKitPrebuiltCallInvitationService().setNavigatorKey(
       AppNavigator.navigatorKey,
@@ -74,21 +84,22 @@ class ZegoCallService {
     _initializedUserId = user.id;
   }
 
-  Future<void> joinAudioCall({
+  Future<String?> joinAudioCall({
     required UserProfile user,
     required CallSession session,
     required Future<void> Function() onSyncEndCall,
   }) async {
-    if (!isConfigured || session.roomId.isEmpty) {
-      return;
+    final blockedReason = getJoinBlockReason(session);
+    if (blockedReason != null) {
+      return blockedReason;
     }
     if (_activeCallSessionId == session.callSessionId) {
-      return;
+      return null;
     }
 
     final navigatorState = AppNavigator.navigatorKey.currentState;
     if (navigatorState == null) {
-      return;
+      return 'Ứng dụng chưa sẵn sàng mở màn hình cuộc gọi. Bạn thử lại sau vài giây nhé.';
     }
 
     _activeCallSessionId = session.callSessionId;
@@ -106,6 +117,7 @@ class ZegoCallService {
     if (_activeCallSessionId == session.callSessionId) {
       _activeCallSessionId = null;
     }
+    return null;
   }
 
   void clearActiveCall() {

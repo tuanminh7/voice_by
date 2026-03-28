@@ -1,0 +1,12 @@
+name: floating
+description: Local stub of the floating package to disable Android PiP while keeping builds stable.
+version: 6.0.0
+publish_to: "none"
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter

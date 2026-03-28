@@ -78,8 +78,8 @@ Neu chay mobile:
 2. Chay:
 
 ```powershell
-C:\Flutter\flutter\bin\flutter.bat pub get
-C:\Flutter\flutter\bin\flutter.bat run
+D:\Flutter\flutter\bin\flutter.bat pub get
+D:\Flutter\flutter\bin\flutter.bat run
 ```
 
 Luu y:

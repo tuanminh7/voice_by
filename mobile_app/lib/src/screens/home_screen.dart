@@ -245,6 +245,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 activeCall: controller.activeCall,
                 currentUserId: profile?.id,
                 busy: controller.busy,
+                hasRealtimeCallConfig: controller.hasRealtimeCallConfig,
                 isListening: _isListening,
                 onListen: _startListening,
                 onStop: _stopListening,
@@ -337,6 +338,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 callHistory: controller.callHistory,
                 currentUserId: profile?.id,
                 busy: controller.busy,
+                hasRealtimeCallConfig: controller.hasRealtimeCallConfig,
                 onAccept: controller.acceptActiveCall,
                 onDecline: controller.declineActiveCall,
                 onEnd: controller.endActiveCall,
@@ -348,6 +350,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 busy: controller.busy,
                 pushStatusMessage: controller.pushStatusMessage,
                 hasPushMessagingConfig: controller.hasPushMessagingConfig,
+                hasRealtimeCallConfig: controller.hasRealtimeCallConfig,
                 apiKeyController: _apiKey,
                 onSaveApiKey: () async {
                   final value = _apiKey.text.trim();
@@ -407,6 +410,7 @@ class _VoiceView extends StatelessWidget {
     required this.activeCall,
     required this.currentUserId,
     required this.busy,
+    required this.hasRealtimeCallConfig,
     required this.isListening,
     required this.onListen,
     required this.onStop,
@@ -423,6 +427,7 @@ class _VoiceView extends StatelessWidget {
   final CallSession? activeCall;
   final int? currentUserId;
   final bool busy;
+  final bool hasRealtimeCallConfig;
   final bool isListening;
   final Future<void> Function() onListen;
   final Future<void> Function() onStop;
@@ -504,7 +509,7 @@ class _VoiceView extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                  'Ví dụ: "Gọi con trai", "Gọi con gái", "Gọi người nhà".'),
+                  'Ví dụ: "Gọi con trai", "Gọi con gái", "Nhắn cho con trai là tối nay mẹ nấu cơm rồi nhé".'),
               const SizedBox(height: 12),
               TextField(
                 controller: transcriptController,
@@ -549,7 +554,7 @@ class _VoiceView extends StatelessWidget {
                 ),
               ] else
                 const Text(
-                  'Bác có thể trò chuyện bình thường với Icare. Nếu muốn gọi người thân, hãy nói ví dụ như "Gọi con trai", sau đó nói "xác nhận" để thực hiện cuộc gọi.',
+                  'Bác có thể trò chuyện bình thường với Icare. Nếu muốn gọi người thân, hãy nói như "Gọi con trai", sau đó nói "xác nhận". Nếu muốn nhắn hộ, hãy nói như "Nhắn cho con trai là tối nay mẹ nấu cơm rồi nhé".',
                 ),
             ],
           ),
@@ -559,6 +564,7 @@ class _VoiceView extends StatelessWidget {
           activeCall: activeCall,
           currentUserId: currentUserId,
           busy: busy,
+          hasRealtimeCallConfig: hasRealtimeCallConfig,
           onAccept: onAcceptCall,
           onDecline: onDeclineCall,
           onEnd: onEndCall,
@@ -1084,6 +1090,7 @@ class _CallsView extends StatelessWidget {
     required this.callHistory,
     required this.currentUserId,
     required this.busy,
+    required this.hasRealtimeCallConfig,
     required this.onAccept,
     required this.onDecline,
     required this.onEnd,
@@ -1094,6 +1101,7 @@ class _CallsView extends StatelessWidget {
   final List<CallSession> callHistory;
   final int? currentUserId;
   final bool busy;
+  final bool hasRealtimeCallConfig;
   final Future<void> Function() onAccept;
   final Future<void> Function() onDecline;
   final Future<void> Function() onEnd;
@@ -1107,6 +1115,7 @@ class _CallsView extends StatelessWidget {
           activeCall: activeCall,
           currentUserId: currentUserId,
           busy: busy,
+          hasRealtimeCallConfig: hasRealtimeCallConfig,
           onAccept: onAccept,
           onDecline: onDecline,
           onEnd: onEnd,
@@ -1128,6 +1137,7 @@ class _SettingsView extends StatelessWidget {
     required this.busy,
     required this.pushStatusMessage,
     required this.hasPushMessagingConfig,
+    required this.hasRealtimeCallConfig,
     required this.apiKeyController,
     required this.onSaveApiKey,
     required this.onDeleteApiKey,
@@ -1138,6 +1148,7 @@ class _SettingsView extends StatelessWidget {
   final bool busy;
   final String? pushStatusMessage;
   final bool hasPushMessagingConfig;
+  final bool hasRealtimeCallConfig;
   final TextEditingController apiKeyController;
   final Future<void> Function() onSaveApiKey;
   final Future<void> Function() onDeleteApiKey;
@@ -1198,6 +1209,26 @@ class _SettingsView extends StatelessWidget {
               if (pushStatusMessage?.isNotEmpty == true) ...[
                 const SizedBox(height: 8),
                 Text(pushStatusMessage!),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 20),
+        _Panel(
+          title: 'Gọi thoại realtime',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                hasRealtimeCallConfig
+                    ? 'Thiết bị này đã có cấu hình thoại realtime.'
+                    : 'Thiết bị này chưa có cấu hình thoại realtime.',
+              ),
+              if (!hasRealtimeCallConfig) ...[
+                const SizedBox(height: 8),
+                const Text(
+                  'Muốn gọi hoặc nghe máy ổn định, bạn cần build lại APK với ZEGO_APP_ID và ZEGO_APP_SIGN rồi cài lại app.',
+                ),
               ],
             ],
           ),
@@ -1269,6 +1300,7 @@ class _ActiveCallPanel extends StatelessWidget {
     required this.activeCall,
     required this.currentUserId,
     required this.busy,
+    required this.hasRealtimeCallConfig,
     required this.onAccept,
     required this.onDecline,
     required this.onEnd,
@@ -1278,6 +1310,7 @@ class _ActiveCallPanel extends StatelessWidget {
   final CallSession? activeCall;
   final int? currentUserId;
   final bool busy;
+  final bool hasRealtimeCallConfig;
   final Future<void> Function() onAccept;
   final Future<void> Function() onDecline;
   final Future<void> Function() onEnd;
@@ -1287,10 +1320,12 @@ class _ActiveCallPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final userId = currentUserId;
     final session = activeCall;
-    final canAccept = userId != null && session?.canAccept(userId) == true;
+    final canAccept =
+        hasRealtimeCallConfig && userId != null && session?.canAccept(userId) == true;
     final canDecline = userId != null && session?.canDecline(userId) == true;
     final canEnd = userId != null && session?.canEnd(userId) == true;
-    final canRedial = userId != null && session?.canRedial(userId) == true;
+    final canRedial =
+        hasRealtimeCallConfig && userId != null && session?.canRedial(userId) == true;
 
     return _Panel(
       title: 'Cuộc gọi hiện tại',
@@ -1308,6 +1343,13 @@ class _ActiveCallPanel extends StatelessWidget {
                   Text('Đang đổ chuông: ${session.currentTargetName}'),
                 if (session.transcriptText?.isNotEmpty == true)
                   Text('Nội dung: ${session.transcriptText}'),
+                if (!hasRealtimeCallConfig) ...[
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Thiết bị này chưa có cấu hình thoại realtime, nên chưa thể vào phòng nói chuyện sau khi nghe máy.',
+                    style: TextStyle(color: Color(0xFFB91C1C)),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 if (canAccept || canDecline || canEnd || canRedial)
                   Wrap(

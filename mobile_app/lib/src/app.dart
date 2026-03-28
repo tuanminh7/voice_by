@@ -129,6 +129,7 @@ class _HomeShell extends StatelessWidget {
               relationshipLabel:
                   activeCall.relationshipLabel ?? activeCall.relationshipKey,
               transcriptText: activeCall.transcriptText,
+              hasRealtimeCallConfig: controller.hasRealtimeCallConfig,
               onAccept: controller.acceptActiveCall,
               onDecline: controller.declineActiveCall,
               busy: controller.busy,
@@ -144,6 +145,7 @@ class _IncomingCallFullscreen extends StatelessWidget {
     required this.callerName,
     required this.relationshipLabel,
     required this.transcriptText,
+    required this.hasRealtimeCallConfig,
     required this.onAccept,
     required this.onDecline,
     required this.busy,
@@ -152,6 +154,7 @@ class _IncomingCallFullscreen extends StatelessWidget {
   final String callerName;
   final String? relationshipLabel;
   final String? transcriptText;
+  final bool hasRealtimeCallConfig;
   final Future<void> Function() onAccept;
   final Future<void> Function() onDecline;
   final bool busy;
@@ -237,6 +240,17 @@ class _IncomingCallFullscreen extends StatelessWidget {
                   ),
                 ),
               ],
+              if (!hasRealtimeCallConfig) ...[
+                const SizedBox(height: 18),
+                Text(
+                  'Bản app này chưa có cấu hình thoại realtime nên chưa thể nhận máy để vào nói chuyện.',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: const Color(0xFFFFC9C9),
+                    height: 1.5,
+                  ),
+                ),
+              ],
               const Spacer(),
               if (busy)
                 const Padding(
@@ -260,7 +274,9 @@ class _IncomingCallFullscreen extends StatelessWidget {
                   const SizedBox(width: 16),
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: busy ? null : () async => onAccept(),
+                      onPressed: busy || !hasRealtimeCallConfig
+                          ? null
+                          : () async => onAccept(),
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF1E8E5A),
                         foregroundColor: Colors.white,

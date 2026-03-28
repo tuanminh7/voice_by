@@ -138,6 +138,19 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  void _showRealtimeCallSetupError([String? message]) {
+    errorMessage = message ?? AppConfig.realtimeCallSetupHint;
+    notifyListeners();
+  }
+
+  bool _ensureRealtimeCallReady() {
+    if (hasRealtimeCallConfig) {
+      return true;
+    }
+    _showRealtimeCallSetupError();
+    return false;
+  }
+
   Future<void> login({
     required String identifier,
     required String password,
@@ -316,6 +329,7 @@ class AppController extends ChangeNotifier {
     await _runBusy(() async {
       latestVoiceAssistantResult = await _apiService.submitVoiceInput(
         transcriptText,
+        realtimeCallReady: hasRealtimeCallConfig,
       );
       final createdCall = latestVoiceAssistantResult?.call;
       if (createdCall != null) {
@@ -370,6 +384,9 @@ class AppController extends ChangeNotifier {
     if (session == null) {
       return;
     }
+    if (!_ensureRealtimeCallReady()) {
+      return;
+    }
 
     await _runBusy(() async {
       activeCall = await _apiService.acceptCall(session.callSessionId);
@@ -408,6 +425,9 @@ class AppController extends ChangeNotifier {
   Future<void> redialActiveCall() async {
     final session = activeCall;
     if (session == null || session.relationshipKey.trim().isEmpty) {
+      return;
+    }
+    if (!_ensureRealtimeCallReady()) {
       return;
     }
 
@@ -731,7 +751,7 @@ class AppController extends ChangeNotifier {
     }
 
     await _ringtoneService.stop();
-    await _callService.joinAudioCall(
+    final joinError = await _callService.joinAudioCall(
       user: currentUser,
       session: session,
       onSyncEndCall: () async {
@@ -742,6 +762,10 @@ class AppController extends ChangeNotifier {
         notifyListeners();
       },
     );
+    if (joinError != null && joinError.trim().isNotEmpty) {
+      errorMessage = joinError;
+      notifyListeners();
+    }
   }
 
   void _mergeCallIntoHistory(CallSession session) {

@@ -1343,16 +1343,66 @@ def build_voice_confirmation_message(user_row: sqlite3.Row, target_label: str) -
 def create_call_from_voice_intent():
     payload = require_json()
     transcript_text = (payload.get("transcript_text") or "").strip()
+    raw_realtime_call_ready = payload.get("realtime_call_ready")
+    if raw_realtime_call_ready is None:
+        realtime_call_ready = True
+    elif isinstance(raw_realtime_call_ready, str):
+        realtime_call_ready = raw_realtime_call_ready.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        realtime_call_ready = bool(raw_realtime_call_ready)
     if not transcript_text:
         return json_error("Thiếu nội dung giọng nói đã nhận dạng.", 400, "missing_transcript")
 
     relationship_rows = list_call_relationship_rows(g.current_user["id"])
     pending_intent = get_pending_voice_call_intent()
+    family_chat_intent = detect_family_chat_intent(transcript_text, g.current_user["id"])
     intent = detect_call_intent(transcript_text, relationship_rows)
 
-    if pending_intent and intent.get("type") == "call":
+    if pending_intent and (intent.get("type") == "call" or family_chat_intent.get("type") == "family_chat"):
         clear_pending_voice_call_intent()
         pending_intent = None
+
+    if family_chat_intent.get("type") == "family_chat":
+        if family_chat_intent.get("needs_confirmation"):
+            return jsonify(
+                {
+                    "action": "chat",
+                    "message": family_chat_intent.get("question") or "Bác nói lại giúp con người nhận nhé.",
+                }
+            )
+
+        message_payload = create_family_chat_message(
+            g.current_user["id"],
+            family_chat_intent["recipient_user_id"],
+            family_chat_intent["message_text"],
+        )
+        if not message_payload:
+            return json_error("Không thể nhắn tin cho người này trong gia đình.", 404, "chat_partner_not_found")
+
+        ack_message = (
+            f"Con đã nhắn giúp bác cho {family_chat_intent['target_label']} rồi nhé: "
+            f"\"{family_chat_intent['message_text']}\""
+        )
+        remember_turn(get_history(), transcript_text, ack_message)
+        return jsonify(
+            {
+                "action": "chat",
+                "message": ack_message,
+                "chat_message": message_payload,
+            }
+        )
+
+    if not realtime_call_ready and intent.get("type") == "call":
+        clear_pending_voice_call_intent()
+        return jsonify(
+            {
+                "action": "chat",
+                "message": (
+                    "Bản app hiện tại chưa có cấu hình gọi thoại realtime nên chưa thể gọi hoặc nghe máy. "
+                    "Bạn hãy build lại APK với ZEGO_APP_ID và ZEGO_APP_SIGN rồi thử lại nhé."
+                ),
+            }
+        )
 
     if pending_intent and is_voice_confirmation_reply(transcript_text):
         session_row = create_call_session_for_relationship(
@@ -1445,37 +1495,6 @@ def create_call_from_voice_intent():
             "action": "confirm",
             "message": confirmation_message,
             "question": confirmation_message,
-        }
-    )
-
-    intent = detect_call_intent(transcript_text, relationship_rows)
-    if intent.get("type") != "call":
-        return jsonify({"action": "chat", "message": "Đây chưa phải là lệnh gọi khẩn cấp."})
-
-    if intent.get("needs_confirmation"):
-        return jsonify(
-            {
-                "action": "confirm",
-                "question": intent.get("question") or "Bác muốn gọi ai ạ?",
-                "intent": intent,
-            }
-        )
-
-    session_row = create_call_session_for_relationship(
-        caller_user_id=g.current_user["id"],
-        relationship_key=intent["relationship_key"],
-        relative_user_id=intent.get("relative_user_id"),
-        transcript_text=transcript_text,
-        trigger_source="voice",
-    )
-    if not session_row:
-        return json_error("Gia đình chưa cài đặt người nhận cho lệnh gọi này.", 404, "call_target_not_found")
-
-    return jsonify(
-        {
-            "action": "calling",
-            "message": f"Đang gọi {RELATIONSHIP_LABELS.get(intent['relationship_key'], intent['relationship_key'])} cho bác.",
-            "call": build_call_session_payload(session_row["id"]),
         }
     )
 
@@ -2358,6 +2377,310 @@ def simplify_text(value: str) -> str:
 def normalize_relationship_key(value: str) -> str:
     simplified = simplify_text(value)
     return RELATIONSHIP_ALIASES.get(simplified, simplified)
+
+
+def extract_voice_message_command(text: str) -> dict | None:
+    normalized_text = " ".join((text or "").strip().split())
+    if not normalized_text:
+        return None
+
+    remaining_text = normalized_text
+    lowered_remaining = remaining_text.lower()
+
+    for prefix in (
+        "bạn ",
+        "ban ",
+        "icare ",
+        "bot ",
+        "trợ lý ",
+        "tro ly ",
+    ):
+        if lowered_remaining.startswith(prefix):
+            remaining_text = remaining_text[len(prefix):].lstrip()
+            lowered_remaining = remaining_text.lower()
+            break
+
+    for prefix in (
+        "hãy ",
+        "hay ",
+        "giúp ",
+        "giup ",
+        "vui lòng ",
+        "vui long ",
+    ):
+        if lowered_remaining.startswith(prefix):
+            remaining_text = remaining_text[len(prefix):].lstrip()
+            lowered_remaining = remaining_text.lower()
+            break
+
+    command_prefix = None
+    for prefix in (
+        "gửi tin nhắn cho ",
+        "gui tin nhan cho ",
+        "gửi lời nhắn cho ",
+        "gui loi nhan cho ",
+        "nhắn cho ",
+        "nhan cho ",
+        "nhắn giúp ",
+        "nhan giup ",
+        "bảo ",
+        "bao ",
+        "nói với ",
+        "noi voi ",
+        "nhắc ",
+        "nhac ",
+    ):
+        if lowered_remaining.startswith(prefix):
+            command_prefix = prefix
+            break
+
+    if command_prefix is None:
+        return None
+
+    remaining_text = remaining_text[len(command_prefix):].strip()
+    lowered_remaining = remaining_text.lower()
+
+    separator_index = -1
+    separator_text = None
+    for separator in (
+        " nội dung là ",
+        " noi dung la ",
+        " rằng ",
+        " rang ",
+        " là ",
+        " la ",
+    ):
+        separator_index = lowered_remaining.find(separator)
+        if separator_index >= 0:
+            separator_text = separator
+            break
+
+    if separator_index < 0 or separator_text is None:
+        return None
+
+    target_hint = remaining_text[:separator_index].strip(" ,:;.!?-")
+    message_text = remaining_text[separator_index + len(separator_text):].strip()
+    message_text = message_text.strip("\"'“”")
+    if target_hint and message_text:
+        return {
+            "target_hint": target_hint,
+            "message_text": message_text,
+        }
+
+    return None
+
+
+def clean_voice_target_hint(value: str) -> str:
+    simplified = simplify_text(value)
+    simplified = re.sub(r"\b(cua toi|toi|oi|nhe|nha|dum|dum nhe|giup toi)\b", " ", simplified)
+    return re.sub(r"\s+", " ", simplified).strip()
+
+
+def list_voice_message_target_candidates(owner_user_id: int) -> list[dict]:
+    membership = get_active_family_membership(owner_user_id)
+    if not membership:
+        return []
+
+    rows = fetch_all(
+        """
+        SELECT
+            fm.user_id,
+            u.full_name,
+            u.care_role_key,
+            fr.relationship_key,
+            fr.custom_aliases
+        FROM family_members fm
+        JOIN users u ON u.id = fm.user_id
+        LEFT JOIN family_relationships fr
+          ON fr.family_group_id = fm.family_group_id
+         AND fr.owner_user_id = ?
+         AND fr.relative_user_id = fm.user_id
+         AND fr.is_active = 1
+        WHERE fm.family_group_id = ?
+          AND fm.status = 'active'
+          AND fm.user_id != ?
+        ORDER BY u.full_name COLLATE NOCASE ASC, fr.priority_order ASC, fr.id ASC
+        """,
+        (owner_user_id, membership["family_group_id"], owner_user_id),
+    )
+
+    candidates: dict[int, dict] = {}
+    for row in rows:
+        user_id = row["user_id"]
+        candidate = candidates.setdefault(
+            user_id,
+            {
+                "user_id": user_id,
+                "full_name": (row["full_name"] or "").strip(),
+                "care_role_key": "",
+                "relationship_keys": set(),
+                "custom_aliases": set(),
+            },
+        )
+
+        care_role_key = normalize_relationship_key(row["care_role_key"] or "")
+        if care_role_key in RELATIONSHIP_LABELS:
+            candidate["care_role_key"] = care_role_key
+
+        relationship_key = normalize_relationship_key(row["relationship_key"] or "")
+        if relationship_key in RELATIONSHIP_LABELS:
+            candidate["relationship_keys"].add(relationship_key)
+
+        for alias in split_alias_input(row["custom_aliases"] or ""):
+            candidate["custom_aliases"].add(alias)
+
+    return [
+        {
+            **candidate,
+            "relationship_keys": sorted(candidate["relationship_keys"]),
+            "custom_aliases": sorted(candidate["custom_aliases"]),
+        }
+        for candidate in candidates.values()
+    ]
+
+
+def iter_relationship_aliases(relationship_key: str) -> list[str]:
+    aliases = [RELATIONSHIP_LABELS.get(relationship_key, relationship_key)]
+    for alias, mapped_key in RELATIONSHIP_ALIASES.items():
+        if mapped_key == relationship_key:
+            aliases.append(alias)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        simplified = simplify_text(alias)
+        if not simplified or simplified in seen:
+            continue
+        seen.add(simplified)
+        deduped.append(alias)
+    return deduped
+
+
+def alias_matches_hint(alias: str, target_hint: str) -> bool:
+    simplified_alias = simplify_text(alias)
+    simplified_hint = clean_voice_target_hint(target_hint)
+    if not simplified_alias or not simplified_hint:
+        return False
+    if simplified_alias == simplified_hint:
+        return True
+    if len(simplified_alias) >= 4 and simplified_alias in simplified_hint:
+        return True
+    if len(simplified_hint) >= 4 and simplified_hint in simplified_alias:
+        return True
+    return False
+
+
+def describe_voice_message_target(candidate: dict) -> str:
+    full_name = (candidate.get("full_name") or "").strip() or "người thân"
+    relationship_keys = candidate.get("relationship_keys") or []
+    primary_role_key = relationship_keys[0] if relationship_keys else (candidate.get("care_role_key") or "")
+    relationship_label = RELATIONSHIP_LABELS.get(primary_role_key, "")
+    if relationship_label:
+        return f"{full_name} ({relationship_label})"
+    return full_name
+
+
+def resolve_voice_message_target(owner_user_id: int, target_hint: str) -> dict:
+    candidates = list_voice_message_target_candidates(owner_user_id)
+    if not candidates:
+        return {
+            "status": "no_family_targets",
+            "question": "Gia đình của bác chưa có người thân nào để nhắn tin.",
+        }
+
+    name_matches: list[dict] = []
+    role_matches: list[dict] = []
+
+    for candidate in candidates:
+        aliases = [candidate["full_name"], *candidate["custom_aliases"]]
+        if any(alias_matches_hint(alias, target_hint) for alias in aliases):
+            name_matches.append(candidate)
+            continue
+
+        role_aliases: list[str] = []
+        if candidate.get("care_role_key"):
+            role_aliases.extend(iter_relationship_aliases(candidate["care_role_key"]))
+        for relationship_key in candidate.get("relationship_keys") or []:
+            role_aliases.extend(iter_relationship_aliases(relationship_key))
+
+        if any(alias_matches_hint(alias, target_hint) for alias in role_aliases):
+            role_matches.append(candidate)
+
+    if len(name_matches) == 1:
+        target = name_matches[0]
+        return {
+            "status": "resolved",
+            "candidate": target,
+            "target_label": describe_voice_message_target(target),
+        }
+
+    if len(name_matches) > 1:
+        names = [candidate["full_name"] for candidate in name_matches[:3]]
+        return {
+            "status": "ambiguous",
+            "question": (
+                f"Bác muốn nhắn cho {', '.join(names)} ạ? "
+                "Bác nói lại đầy đủ giúp con nhé."
+            ),
+        }
+
+    if len(role_matches) == 1:
+        target = role_matches[0]
+        return {
+            "status": "resolved",
+            "candidate": target,
+            "target_label": describe_voice_message_target(target),
+        }
+
+    if len(role_matches) > 1:
+        names = [candidate["full_name"] for candidate in role_matches[:3]]
+        return {
+            "status": "ambiguous",
+            "question": (
+                f"Con thấy có nhiều người phù hợp: {', '.join(names)}. "
+                "Bác nói lại rõ hơn giúp con nhé."
+            ),
+        }
+
+    sample_names = [candidate["full_name"] for candidate in candidates[:3] if candidate.get("full_name")]
+    if sample_names:
+        return {
+            "status": "not_found",
+            "question": (
+                f"Con chưa xác định đúng người nhận. "
+                f"Bác có thể nói theo mẫu: nhắn cho {sample_names[0]} là ..."
+            ),
+        }
+
+    return {
+        "status": "not_found",
+        "question": "Con chưa xác định đúng người nhận. Bác nói lại giúp con nhé.",
+    }
+
+
+def detect_family_chat_intent(text: str, owner_user_id: int) -> dict:
+    command = extract_voice_message_command(text)
+    if command is None:
+        return {"type": "chat"}
+
+    target_resolution = resolve_voice_message_target(owner_user_id, command["target_hint"])
+    if target_resolution["status"] != "resolved":
+        return {
+            "type": "family_chat",
+            "needs_confirmation": True,
+            "question": target_resolution["question"],
+            "message_text": command["message_text"],
+        }
+
+    candidate = target_resolution["candidate"]
+    return {
+        "type": "family_chat",
+        "needs_confirmation": False,
+        "recipient_user_id": candidate["user_id"],
+        "recipient_full_name": candidate["full_name"],
+        "target_label": target_resolution["target_label"],
+        "message_text": command["message_text"],
+    }
 
 
 def get_user_care_role_key(user_row: sqlite3.Row | None) -> str | None:
