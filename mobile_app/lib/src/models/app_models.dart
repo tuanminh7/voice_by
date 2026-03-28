@@ -44,6 +44,8 @@ class UserProfile {
     required this.age,
     required this.email,
     required this.phoneNumber,
+    required this.careRoleKey,
+    required this.careRoleLabel,
     required this.hasPersonalGeminiKey,
     required this.geminiKeyPreview,
   });
@@ -53,6 +55,8 @@ class UserProfile {
   final int age;
   final String email;
   final String phoneNumber;
+  final String careRoleKey;
+  final String careRoleLabel;
   final bool hasPersonalGeminiKey;
   final String geminiKeyPreview;
 
@@ -63,6 +67,8 @@ class UserProfile {
       age: json['age'] as int? ?? 0,
       email: json['email'] as String? ?? '',
       phoneNumber: json['phone_number'] as String? ?? '',
+      careRoleKey: json['care_role_key'] as String? ?? '',
+      careRoleLabel: json['care_role_label'] as String? ?? '',
       hasPersonalGeminiKey: json['has_personal_gemini_key'] as bool? ?? false,
       geminiKeyPreview: json['gemini_key_preview'] as String? ?? '',
     );
@@ -220,6 +226,38 @@ class CallRelationshipBundle {
   final List<RelationshipOption> supportedRelationships;
 }
 
+class VoiceAssistantResult {
+  const VoiceAssistantResult({
+    required this.action,
+    required this.message,
+    required this.question,
+    required this.call,
+  });
+
+  final String action;
+  final String message;
+  final String? question;
+  final CallSession? call;
+
+  bool get isCalling => action == 'calling' && call != null;
+  bool get isConfirmationRequired => action == 'confirm';
+
+  factory VoiceAssistantResult.fromJson(Map<String, dynamic> json) {
+    final rawMessage = json['message'] as String? ?? '';
+    final rawQuestion = json['question'] as String?;
+    return VoiceAssistantResult(
+      action: json['action'] as String? ?? 'chat',
+      message: rawMessage.isNotEmpty
+          ? rawMessage
+          : (rawQuestion ?? 'Trợ lý chưa có phản hồi.'),
+      question: rawQuestion,
+      call: json['call'] is Map<String, dynamic>
+          ? CallSession.fromJson(json['call'] as Map<String, dynamic>)
+          : null,
+    );
+  }
+}
+
 class CallParty {
   const CallParty({
     required this.id,
@@ -309,6 +347,33 @@ class CallSession {
     return finished.contains(status);
   }
 
+  bool isCaller(int userId) => caller?.id == userId;
+
+  bool isAcceptedBy(int userId) => acceptedBy?.id == userId;
+
+  CallTarget? targetForUser(int userId) {
+    for (final target in targets) {
+      if (target.targetUserId == userId) {
+        return target;
+      }
+    }
+    return null;
+  }
+
+  bool isRingingFor(int userId) {
+    final target = targetForUser(userId);
+    return status == 'ringing' && target?.status == 'ringing';
+  }
+
+  bool canAccept(int userId) => isRingingFor(userId);
+
+  bool canDecline(int userId) => isRingingFor(userId);
+
+  bool canEnd(int userId) => isCaller(userId) && !isFinished;
+
+  bool canRedial(int userId) =>
+      isCaller(userId) && isFinished && relationshipKey.trim().isNotEmpty;
+
   factory CallSession.fromJson(Map<String, dynamic> json) {
     final currentTarget = json['current_target'] as Map<String, dynamic>?;
     final targets = (json['targets'] as List<dynamic>? ?? const [])
@@ -381,9 +446,10 @@ class EmotionEntry {
       emotionScore: json['emotion_score'] as int? ?? 100,
       riskLevel: json['risk_level'] as String? ?? 'stable',
       alertSent: json['alert_sent'] as bool? ?? false,
-      detectedKeywords: (json['detected_keywords'] as List<dynamic>? ?? const [])
-          .map((item) => '$item')
-          .toList(),
+      detectedKeywords:
+          (json['detected_keywords'] as List<dynamic>? ?? const [])
+              .map((item) => '$item')
+              .toList(),
       createdAt: json['created_at'] as String? ?? '',
     );
   }

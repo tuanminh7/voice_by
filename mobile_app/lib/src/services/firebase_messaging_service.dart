@@ -5,16 +5,28 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 
+enum PushMessageSource {
+  foreground,
+  notificationTap,
+  appLaunch,
+}
+
 class CallPushMessage {
   const CallPushMessage({
     required this.eventType,
     required this.callSessionId,
     required this.payload,
+    required this.source,
   });
 
   final String eventType;
   final int? callSessionId;
   final Map<String, dynamic> payload;
+  final PushMessageSource source;
+
+  bool get openedFromNotification =>
+      source == PushMessageSource.notificationTap ||
+      source == PushMessageSource.appLaunch;
 }
 
 @pragma('vm:entry-point')
@@ -31,6 +43,8 @@ class FirebaseMessagingService {
 
   final StreamController<CallPushMessage> _callMessageController =
       StreamController<CallPushMessage>.broadcast();
+  final StreamController<String> _tokenController =
+      StreamController<String>.broadcast();
 
   StreamSubscription<RemoteMessage>? _onMessageSubscription;
   StreamSubscription<RemoteMessage>? _onMessageOpenedSubscription;
@@ -47,6 +61,7 @@ class FirebaseMessagingService {
   CallPushMessage? get launchMessage => _launchMessage;
   String? get availabilityMessage => _availabilityMessage;
   Stream<CallPushMessage> get callMessages => _callMessageController.stream;
+  Stream<String> get tokenChanges => _tokenController.stream;
 
   Future<void> initialize() async {
     if (_initialized) {
@@ -64,19 +79,29 @@ class FirebaseMessagingService {
 
       final initialMessage =
           await FirebaseMessaging.instance.getInitialMessage();
-      _launchMessage = _parseCallMessage(initialMessage);
+      _launchMessage = _parseCallMessage(
+        initialMessage,
+        source: PushMessageSource.appLaunch,
+      );
 
       _onMessageSubscription = FirebaseMessaging.onMessage.listen(
-        _handleRemoteMessage,
+        (message) => _handleRemoteMessage(
+          message,
+          source: PushMessageSource.foreground,
+        ),
       );
       _onMessageOpenedSubscription =
           FirebaseMessaging.onMessageOpenedApp.listen(
-        _handleRemoteMessage,
+        (message) => _handleRemoteMessage(
+          message,
+          source: PushMessageSource.notificationTap,
+        ),
       );
       _tokenRefreshSubscription =
           FirebaseMessaging.instance.onTokenRefresh.listen((token) {
         _deviceToken = token;
         _availabilityMessage = 'Da nhan duoc FCM token tu dong.';
+        _tokenController.add(token);
       });
     } catch (error) {
       _available = false;
@@ -123,8 +148,11 @@ class FirebaseMessagingService {
     _launchMessage = null;
   }
 
-  void _handleRemoteMessage(RemoteMessage message) {
-    final parsed = _parseCallMessage(message);
+  void _handleRemoteMessage(
+    RemoteMessage message, {
+    required PushMessageSource source,
+  }) {
+    final parsed = _parseCallMessage(message, source: source);
     if (parsed == null) {
       return;
     }
@@ -132,7 +160,10 @@ class FirebaseMessagingService {
     _callMessageController.add(parsed);
   }
 
-  CallPushMessage? _parseCallMessage(RemoteMessage? message) {
+  CallPushMessage? _parseCallMessage(
+    RemoteMessage? message, {
+    required PushMessageSource source,
+  }) {
     if (message == null) {
       return null;
     }
@@ -149,6 +180,7 @@ class FirebaseMessagingService {
       eventType: eventType,
       callSessionId: callSessionId,
       payload: Map<String, dynamic>.from(message.data),
+      source: source,
     );
   }
 
@@ -156,6 +188,7 @@ class FirebaseMessagingService {
     await _onMessageSubscription?.cancel();
     await _onMessageOpenedSubscription?.cancel();
     await _tokenRefreshSubscription?.cancel();
+    await _tokenController.close();
     await _callMessageController.close();
   }
 }

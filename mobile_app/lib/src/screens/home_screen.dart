@@ -1,3 +1,4 @@
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:speech_to_text/speech_to_text.dart';
@@ -16,6 +17,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   final _speech = SpeechToText();
+  final _tts = FlutterTts();
   final _transcript = TextEditingController();
   final _chatComposer = TextEditingController();
   final _familyName = TextEditingController();
@@ -27,19 +29,24 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _selectedRelationshipKey;
   int? _selectedRelativeUserId;
   bool _isListening = false;
+  String? _lastSpokenAssistantMessage;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        context.read<AppController>().loadHomeData();
-      }
-    });
+    _configureTts();
+  }
+
+  Future<void> _configureTts() async {
+    await _tts.setLanguage('vi-VN');
+    await _tts.setSpeechRate(0.45);
+    await _tts.setPitch(1.0);
+    await _tts.awaitSpeakCompletion(true);
   }
 
   @override
   void dispose() {
+    _tts.stop();
     _transcript.dispose();
     _chatComposer.dispose();
     _familyName.dispose();
@@ -128,10 +135,22 @@ class _HomeScreenState extends State<HomeScreen> {
 
   int? _resolveRelativeUserId(List<FamilyMember> members) {
     final selected = _selectedRelativeUserId;
-    if (selected != null && members.any((member) => member.userId == selected)) {
+    if (selected != null &&
+        members.any((member) => member.userId == selected)) {
       return selected;
     }
     return members.isNotEmpty ? members.first.userId : null;
+  }
+
+  Future<void> _speakAssistantReply(String? message) async {
+    final content = message?.trim() ?? '';
+    if (content.isEmpty || content == _lastSpokenAssistantMessage) {
+      return;
+    }
+
+    _lastSpokenAssistantMessage = content;
+    await _tts.stop();
+    await _tts.speak(content);
   }
 
   @override
@@ -145,6 +164,14 @@ class _HomeScreenState extends State<HomeScreen> {
         .toList();
     final selectedRelationshipKey = _resolveRelationshipKey(options);
     final selectedRelativeUserId = _resolveRelativeUserId(familyMembers);
+    final assistantMessage = controller.latestVoiceAssistantResult?.message;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _speakAssistantReply(assistantMessage);
+    });
 
     return Scaffold(
       appBar: AppBar(title: Text(_sectionTitle(_section))),
@@ -163,10 +190,12 @@ class _HomeScreenState extends State<HomeScreen> {
                         color: const Color(0xFF0F4C81),
                         borderRadius: BorderRadius.circular(18),
                       ),
-                      child: const Icon(Icons.favorite_rounded, color: Colors.white),
+                      child: const Icon(Icons.favorite_rounded,
+                          color: Colors.white),
                     ),
                     const SizedBox(height: 16),
-                    Text('Icare', style: Theme.of(context).textTheme.headlineSmall),
+                    Text('Icare',
+                        style: Theme.of(context).textTheme.headlineSmall),
                     const SizedBox(height: 6),
                     Text(profile?.fullName ?? 'Chưa có hồ sơ'),
                   ],
@@ -212,16 +241,24 @@ class _HomeScreenState extends State<HomeScreen> {
               _VoiceView(
                 profile: profile,
                 transcriptController: _transcript,
+                assistantResult: controller.latestVoiceAssistantResult,
                 activeCall: controller.activeCall,
+                currentUserId: profile?.id,
                 busy: controller.busy,
                 isListening: _isListening,
                 onListen: _startListening,
                 onStop: _stopListening,
-                onSubmit: () => controller.createVoiceCall(_transcript.text.trim()),
-                onRefreshCall: controller.refreshActiveCall,
+                onSubmit: () async {
+                  final value = _transcript.text.trim();
+                  if (value.isEmpty) {
+                    return;
+                  }
+                  await controller.submitVoiceInput(value);
+                },
                 onAcceptCall: controller.acceptActiveCall,
                 onDeclineCall: controller.declineActiveCall,
                 onEndCall: controller.endActiveCall,
+                onRedialCall: controller.redialActiveCall,
               ),
             if (_section == HomeMenuSection.family)
               _FamilyView(
@@ -300,10 +337,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 callHistory: controller.callHistory,
                 currentUserId: profile?.id,
                 busy: controller.busy,
-                onRefresh: controller.refreshActiveCall,
                 onAccept: controller.acceptActiveCall,
                 onDecline: controller.declineActiveCall,
                 onEnd: controller.endActiveCall,
+                onRedial: controller.redialActiveCall,
               ),
             if (_section == HomeMenuSection.settings)
               _SettingsView(
@@ -366,30 +403,34 @@ class _VoiceView extends StatelessWidget {
   const _VoiceView({
     required this.profile,
     required this.transcriptController,
+    required this.assistantResult,
     required this.activeCall,
+    required this.currentUserId,
     required this.busy,
     required this.isListening,
     required this.onListen,
     required this.onStop,
     required this.onSubmit,
-    required this.onRefreshCall,
     required this.onAcceptCall,
     required this.onDeclineCall,
     required this.onEndCall,
+    required this.onRedialCall,
   });
 
   final UserProfile? profile;
   final TextEditingController transcriptController;
+  final VoiceAssistantResult? assistantResult;
   final CallSession? activeCall;
+  final int? currentUserId;
   final bool busy;
   final bool isListening;
   final Future<void> Function() onListen;
   final Future<void> Function() onStop;
-  final VoidCallback onSubmit;
-  final Future<void> Function() onRefreshCall;
+  final Future<void> Function() onSubmit;
   final Future<void> Function() onAcceptCall;
   final Future<void> Function() onDeclineCall;
   final Future<void> Function() onEndCall;
+  final Future<void> Function() onRedialCall;
 
   @override
   Widget build(BuildContext context) {
@@ -439,7 +480,8 @@ class _VoiceView extends StatelessWidget {
                               await onListen();
                             }
                           },
-                    icon: Icon(isListening ? Icons.stop_rounded : Icons.mic_rounded),
+                    icon: Icon(
+                        isListening ? Icons.stop_rounded : Icons.mic_rounded),
                     label: Text(isListening ? 'Dừng nghe' : 'Bắt đầu nói'),
                   ),
                   OutlinedButton(
@@ -447,7 +489,7 @@ class _VoiceView extends StatelessWidget {
                       foregroundColor: Colors.white,
                       side: const BorderSide(color: Colors.white70),
                     ),
-                    onPressed: busy ? null : onSubmit,
+                    onPressed: busy ? null : () async => onSubmit(),
                     child: const Text('Gửi lệnh'),
                   ),
                 ],
@@ -461,7 +503,8 @@ class _VoiceView extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('Ví dụ: "Gọi con trai", "Gọi con gái", "Gọi người nhà".'),
+              const Text(
+                  'Ví dụ: "Gọi con trai", "Gọi con gái", "Gọi người nhà".'),
               const SizedBox(height: 12),
               TextField(
                 controller: transcriptController,
@@ -475,13 +518,51 @@ class _VoiceView extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 20),
+        _Panel(
+          title: 'Phản hồi từ Icare',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (assistantResult != null) ...[
+                if (assistantResult!.isConfirmationRequired)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFF7ED),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: const Text(
+                      'Đang chờ xác nhận cuộc gọi',
+                      style: TextStyle(
+                        color: Color(0xFF9A3412),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                Text(
+                  assistantResult!.message,
+                  style: Theme.of(context).textTheme.bodyLarge,
+                ),
+              ] else
+                const Text(
+                  'Bác có thể trò chuyện bình thường với Icare. Nếu muốn gọi người thân, hãy nói ví dụ như "Gọi con trai", sau đó nói "xác nhận" để thực hiện cuộc gọi.',
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 20),
         _ActiveCallPanel(
           activeCall: activeCall,
+          currentUserId: currentUserId,
           busy: busy,
-          onRefresh: onRefreshCall,
           onAccept: onAcceptCall,
           onDecline: onDeclineCall,
           onEnd: onEndCall,
+          onRedial: onRedialCall,
         ),
       ],
     );
@@ -548,7 +629,8 @@ class _FamilyView extends StatelessWidget {
                     const SizedBox(height: 12),
                     TextField(
                       controller: familyNameController,
-                      decoration: const InputDecoration(labelText: 'Tên gia đình'),
+                      decoration:
+                          const InputDecoration(labelText: 'Tên gia đình'),
                     ),
                     const SizedBox(height: 12),
                     FilledButton(
@@ -576,7 +658,8 @@ class _FamilyView extends StatelessWidget {
                               : member.fullName[0].toUpperCase()),
                         ),
                         title: Text(member.fullName),
-                        subtitle: Text('${member.role} • ${member.phoneNumber}'),
+                        subtitle:
+                            Text('${member.role} • ${member.phoneNumber}'),
                       ),
                     ),
                   ],
@@ -599,7 +682,9 @@ class _FamilyView extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
                 FilledButton(
-                  onPressed: busy || family == null ? null : () async => onInviteMember(),
+                  onPressed: busy || family == null
+                      ? null
+                      : () async => onInviteMember(),
                   child: const Text('Gửi lời mời'),
                 ),
               ],
@@ -628,7 +713,8 @@ class _FamilyView extends StatelessWidget {
                                       invitationId: invitation.id,
                                       action: 'accept',
                                     ),
-                            icon: const Icon(Icons.check_circle_outline_rounded),
+                            icon:
+                                const Icon(Icons.check_circle_outline_rounded),
                           ),
                           IconButton(
                             onPressed: busy
@@ -649,15 +735,18 @@ class _FamilyView extends StatelessWidget {
         _Panel(
           title: 'Thiết lập gọi khẩn cấp',
           child: family == null
-              ? const Text('Hãy tạo hoặc tham gia gia đình trước khi thiết lập gọi khẩn cấp.')
+              ? const Text(
+                  'Hãy tạo hoặc tham gia gia đình trước khi thiết lập gọi khẩn cấp.')
               : familyMembers.isEmpty
-                  ? const Text('Gia đình cần thêm ít nhất một người thân để tạo mapping gọi khẩn cấp.')
+                  ? const Text(
+                      'Gia đình cần thêm ít nhất một người thân để tạo mapping gọi khẩn cấp.')
                   : Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         DropdownButtonFormField<int>(
                           initialValue: selectedRelativeUserId,
-                          decoration: const InputDecoration(labelText: 'Người thân'),
+                          decoration:
+                              const InputDecoration(labelText: 'Người thân'),
                           items: familyMembers
                               .map(
                                 (member) => DropdownMenuItem<int>(
@@ -671,7 +760,8 @@ class _FamilyView extends StatelessWidget {
                         const SizedBox(height: 12),
                         DropdownButtonFormField<String>(
                           initialValue: selectedRelationshipKey,
-                          decoration: const InputDecoration(labelText: 'Quan hệ'),
+                          decoration:
+                              const InputDecoration(labelText: 'Quan hệ'),
                           items: options
                               .map(
                                 (option) => DropdownMenuItem<String>(
@@ -686,7 +776,8 @@ class _FamilyView extends StatelessWidget {
                         TextField(
                           controller: priorityController,
                           keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(labelText: 'Thứ tự ưu tiên'),
+                          decoration: const InputDecoration(
+                              labelText: 'Thứ tự ưu tiên'),
                         ),
                         const SizedBox(height: 12),
                         FilledButton(
@@ -703,11 +794,13 @@ class _FamilyView extends StatelessWidget {
                               title: Text(
                                 '${relationship.relationshipLabel}: ${relationship.relativeFullName}',
                               ),
-                              subtitle: Text('Ưu tiên ${relationship.priorityOrder}'),
+                              subtitle:
+                                  Text('Ưu tiên ${relationship.priorityOrder}'),
                               trailing: IconButton(
                                 onPressed: busy
                                     ? null
-                                    : () => onDeleteRelationship(relationship.id),
+                                    : () =>
+                                        onDeleteRelationship(relationship.id),
                                 icon: const Icon(Icons.delete_outline_rounded),
                               ),
                             ),
@@ -885,14 +978,18 @@ class _ChatView extends StatelessWidget {
                             ? '${thread.partnerFullName} (${thread.unreadCount})'
                             : thread.partnerFullName,
                       ),
-                      selected: activeThread?.partnerUserId == thread.partnerUserId,
-                      onSelected: busy ? null : (_) => onSelectThread(thread.partnerUserId),
+                      selected:
+                          activeThread?.partnerUserId == thread.partnerUserId,
+                      onSelected: busy
+                          ? null
+                          : (_) => onSelectThread(thread.partnerUserId),
                     );
                   }).toList(),
                 ),
                 const SizedBox(height: 16),
                 Container(
-                  constraints: const BoxConstraints(minHeight: 220, maxHeight: 420),
+                  constraints:
+                      const BoxConstraints(minHeight: 220, maxHeight: 420),
                   padding: const EdgeInsets.all(14),
                   decoration: BoxDecoration(
                     color: Colors.grey.shade50,
@@ -902,14 +999,15 @@ class _ChatView extends StatelessWidget {
                   child: messages.isEmpty
                       ? const Align(
                           alignment: Alignment.centerLeft,
-                          child: Text('Hãy gửi lời hỏi thăm đầu tiên cho người thân.'),
+                          child: Text(
+                              'Hãy gửi lời hỏi thăm đầu tiên cho người thân.'),
                         )
                       : ListView.builder(
                           itemCount: messages.length,
                           itemBuilder: (context, index) {
                             final message = messages[index];
-                            final isMine =
-                                currentUserId != null && message.isFromUser(currentUserId!);
+                            final isMine = currentUserId != null &&
+                                message.isFromUser(currentUserId!);
                             return Align(
                               alignment: isMine
                                   ? Alignment.centerRight
@@ -920,13 +1018,15 @@ class _ChatView extends StatelessWidget {
                                   horizontal: 14,
                                   vertical: 12,
                                 ),
-                                constraints: const BoxConstraints(maxWidth: 290),
+                                constraints:
+                                    const BoxConstraints(maxWidth: 290),
                                 decoration: BoxDecoration(
                                   color: isMine
                                       ? const Color(0xFFDCEBFF)
                                       : Colors.white,
                                   borderRadius: BorderRadius.circular(16),
-                                  border: Border.all(color: Colors.grey.shade300),
+                                  border:
+                                      Border.all(color: Colors.grey.shade300),
                                 ),
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -936,7 +1036,8 @@ class _ChatView extends StatelessWidget {
                                       style: Theme.of(context)
                                           .textTheme
                                           .bodySmall
-                                          ?.copyWith(fontWeight: FontWeight.w700),
+                                          ?.copyWith(
+                                              fontWeight: FontWeight.w700),
                                     ),
                                     const SizedBox(height: 4),
                                     Text(message.messageText),
@@ -983,20 +1084,20 @@ class _CallsView extends StatelessWidget {
     required this.callHistory,
     required this.currentUserId,
     required this.busy,
-    required this.onRefresh,
     required this.onAccept,
     required this.onDecline,
     required this.onEnd,
+    required this.onRedial,
   });
 
   final CallSession? activeCall;
   final List<CallSession> callHistory;
   final int? currentUserId;
   final bool busy;
-  final Future<void> Function() onRefresh;
   final Future<void> Function() onAccept;
   final Future<void> Function() onDecline;
   final Future<void> Function() onEnd;
+  final Future<void> Function() onRedial;
 
   @override
   Widget build(BuildContext context) {
@@ -1004,11 +1105,12 @@ class _CallsView extends StatelessWidget {
       children: [
         _ActiveCallPanel(
           activeCall: activeCall,
+          currentUserId: currentUserId,
           busy: busy,
-          onRefresh: onRefresh,
           onAccept: onAccept,
           onDecline: onDecline,
           onEnd: onEnd,
+          onRedial: onRedial,
         ),
         const SizedBox(height: 20),
         _CallHistoryPanel(
@@ -1165,61 +1267,79 @@ class _SummaryChip extends StatelessWidget {
 class _ActiveCallPanel extends StatelessWidget {
   const _ActiveCallPanel({
     required this.activeCall,
+    required this.currentUserId,
     required this.busy,
-    required this.onRefresh,
     required this.onAccept,
     required this.onDecline,
     required this.onEnd,
+    required this.onRedial,
   });
 
   final CallSession? activeCall;
+  final int? currentUserId;
   final bool busy;
-  final Future<void> Function() onRefresh;
   final Future<void> Function() onAccept;
   final Future<void> Function() onDecline;
   final Future<void> Function() onEnd;
+  final Future<void> Function() onRedial;
 
   @override
   Widget build(BuildContext context) {
+    final userId = currentUserId;
+    final session = activeCall;
+    final canAccept = userId != null && session?.canAccept(userId) == true;
+    final canDecline = userId != null && session?.canDecline(userId) == true;
+    final canEnd = userId != null && session?.canEnd(userId) == true;
+    final canRedial = userId != null && session?.canRedial(userId) == true;
+
     return _Panel(
       title: 'Cuộc gọi hiện tại',
-      child: activeCall == null
+      child: session == null
           ? const Text('Hiện chưa có cuộc gọi nào đang diễn ra.')
           : Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Trạng thái: ${activeCall!.status}'),
-                if (activeCall!.caller != null)
-                  Text('Người gọi: ${activeCall!.caller!.fullName}'),
-                if (activeCall!.relationshipLabel?.isNotEmpty == true)
-                  Text('Quan hệ: ${activeCall!.relationshipLabel}'),
-                if (activeCall!.currentTargetName?.isNotEmpty == true)
-                  Text('Đang đổ chuông: ${activeCall!.currentTargetName}'),
-                if (activeCall!.transcriptText?.isNotEmpty == true)
-                  Text('Nội dung: ${activeCall!.transcriptText}'),
+                Text('Trạng thái: ${session.status}'),
+                if (session.caller != null)
+                  Text('Người gọi: ${session.caller!.fullName}'),
+                if (session.relationshipLabel?.isNotEmpty == true)
+                  Text('Quan hệ: ${session.relationshipLabel}'),
+                if (session.currentTargetName?.isNotEmpty == true)
+                  Text('Đang đổ chuông: ${session.currentTargetName}'),
+                if (session.transcriptText?.isNotEmpty == true)
+                  Text('Nội dung: ${session.transcriptText}'),
                 const SizedBox(height: 12),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
-                  children: [
-                    OutlinedButton(
-                      onPressed: busy ? null : () async => onRefresh(),
-                      child: const Text('Làm mới'),
-                    ),
-                    FilledButton(
-                      onPressed: busy ? null : () async => onAccept(),
-                      child: const Text('Nhận cuộc gọi'),
-                    ),
-                    OutlinedButton(
-                      onPressed: busy ? null : () async => onDecline(),
-                      child: const Text('Từ chối'),
-                    ),
-                    FilledButton.tonal(
-                      onPressed: busy ? null : () async => onEnd(),
-                      child: const Text('Kết thúc'),
-                    ),
-                  ],
-                ),
+                if (canAccept || canDecline || canEnd || canRedial)
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: [
+                      if (canAccept)
+                        FilledButton(
+                          onPressed: busy ? null : () async => onAccept(),
+                          child: const Text('Nhận cuộc gọi'),
+                        ),
+                      if (canDecline)
+                        OutlinedButton(
+                          onPressed: busy ? null : () async => onDecline(),
+                          child: const Text('Không nhận'),
+                        ),
+                      if (canEnd)
+                        FilledButton.tonal(
+                          onPressed: busy ? null : () async => onEnd(),
+                          child: const Text('Kết thúc'),
+                        ),
+                      if (canRedial)
+                        FilledButton(
+                          onPressed: busy ? null : () async => onRedial(),
+                          child: const Text('Gọi lại'),
+                        ),
+                    ],
+                  )
+                else
+                  const Text(
+                    'Cuộc gọi đang được xử lý. Nếu đã nhận máy, màn hình phòng gọi sẽ điều khiển phần kết thúc cuộc gọi.',
+                  ),
               ],
             ),
     );
@@ -1243,8 +1363,8 @@ class _CallHistoryPanel extends StatelessWidget {
           ? const Text('Chưa có lịch sử cuộc gọi nào.')
           : Column(
               children: callHistory.take(20).map((session) {
-                final isCaller =
-                    currentUserId != null && session.caller?.id == currentUserId;
+                final isCaller = currentUserId != null &&
+                    session.caller?.id == currentUserId;
                 final direction = isCaller ? 'Bạn gọi' : 'Bạn nhận';
                 return ListTile(
                   contentPadding: EdgeInsets.zero,

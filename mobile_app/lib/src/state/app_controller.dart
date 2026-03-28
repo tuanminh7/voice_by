@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
 import '../config/app_config.dart';
 import '../models/app_models.dart';
 import '../services/api_service.dart';
+import '../services/call_ringtone_service.dart';
 import '../services/firebase_messaging_service.dart';
 import '../services/local_store.dart';
 import '../services/zego_call_service.dart';
@@ -24,15 +24,17 @@ class AppController extends ChangeNotifier {
     this._store,
     this._apiService,
     this._callService,
+    this._ringtoneService,
     this._messagingService,
+    this.deviceId,
   );
 
   final LocalStore _store;
   final ApiService _apiService;
   final ZegoCallService _callService;
+  final CallRingtoneService _ringtoneService;
   final FirebaseMessagingService _messagingService;
-  final String deviceId =
-      'mobile-${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(99999)}';
+  final String deviceId;
 
   AppStage stage = AppStage.loading;
   BootstrapState? bootstrapState;
@@ -47,12 +49,16 @@ class AppController extends ChangeNotifier {
   int? activeChatPartnerUserId;
   List<CallSession> callHistory = const [];
   CallSession? activeCall;
+  VoiceAssistantResult? latestVoiceAssistantResult;
   String? errorMessage;
   bool busy = false;
   Timer? _callPollTimer;
   Timer? _incomingCallWatchTimer;
+  Timer? _chatPollTimer;
   StreamSubscription<CallPushMessage>? _pushSubscription;
+  StreamSubscription<String>? _pushTokenSubscription;
   bool _incomingCallWatchBusy = false;
+  bool _chatPollBusy = false;
 
   bool get hasRealtimeCallConfig => _callService.isConfigured;
   bool get hasPushMessagingConfig => _messagingService.isAvailable;
@@ -75,16 +81,21 @@ class AppController extends ChangeNotifier {
     final store = await LocalStore.create();
     final api = await ApiService.create(store);
     final callService = ZegoCallService();
+    final ringtoneService = CallRingtoneService();
     final messagingService = FirebaseMessagingService();
+    final deviceId = await store.ensureDeviceId();
     await messagingService.initialize();
     await callService.initialize();
     final controller = AppController._(
       store,
       api,
       callService,
+      ringtoneService,
       messagingService,
+      deviceId,
     );
     controller._listenToPushMessages();
+    controller._listenToPushTokenChanges();
     await controller.bootstrap();
     return controller;
   }
@@ -150,6 +161,7 @@ class AppController extends ChangeNotifier {
     required String email,
     required String phoneNumber,
     required String password,
+    required String careRoleKey,
   }) async {
     await _runBusy(() async {
       bootstrapState = await _apiService.register(
@@ -158,6 +170,7 @@ class AppController extends ChangeNotifier {
         email: email,
         phoneNumber: phoneNumber,
         password: password,
+        careRoleKey: careRoleKey,
         deviceId: deviceId,
         deviceName: defaultTargetPlatform.name,
       );
@@ -209,6 +222,7 @@ class AppController extends ChangeNotifier {
       chatThreads = const [];
       activeChatMessages = const [];
       activeChatPartnerUserId = null;
+      _syncChatPolling();
     }
 
     await _syncRealtimeServices();
@@ -298,11 +312,17 @@ class AppController extends ChangeNotifier {
     });
   }
 
-  Future<void> createVoiceCall(String transcriptText) async {
+  Future<void> submitVoiceInput(String transcriptText) async {
     await _runBusy(() async {
-      activeCall = await _apiService.createVoiceCall(transcriptText);
-      _mergeCallIntoHistory(activeCall!);
-      _syncActiveCallFromHistory();
+      latestVoiceAssistantResult = await _apiService.submitVoiceInput(
+        transcriptText,
+      );
+      final createdCall = latestVoiceAssistantResult?.call;
+      if (createdCall != null) {
+        activeCall = createdCall;
+        _mergeCallIntoHistory(createdCall);
+        _syncActiveCallFromHistory();
+      }
     });
   }
 
@@ -311,6 +331,7 @@ class AppController extends ChangeNotifier {
       activeChatPartnerUserId = partnerUserId;
       await _refreshChatThreads();
       await _refreshActiveChatMessages(allowAutoSelect: false);
+      _syncChatPolling();
     });
   }
 
@@ -327,6 +348,7 @@ class AppController extends ChangeNotifier {
       );
       activeChatMessages = [...activeChatMessages, sentMessage];
       await _refreshChatThreads();
+      await _refreshActiveChatMessages(allowAutoSelect: false);
     });
   }
 
@@ -383,13 +405,39 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  Future<void> redialActiveCall() async {
+    final session = activeCall;
+    if (session == null || session.relationshipKey.trim().isEmpty) {
+      return;
+    }
+
+    await _runBusy(() async {
+      final restartedCall = await _apiService.createManualCall(
+        session.relationshipKey,
+      );
+      latestVoiceAssistantResult = VoiceAssistantResult(
+        action: 'calling',
+        message:
+            'Đang gọi lại ${session.relationshipLabel ?? session.relationshipKey}.',
+        question: null,
+        call: restartedCall,
+      );
+      activeCall = restartedCall;
+      _mergeCallIntoHistory(restartedCall);
+      _syncActiveCallFromHistory();
+    });
+  }
+
   Future<void> logout() async {
     await _runBusy(() async {
       await _apiService.logout();
       await _callService.uninitialize();
+      await _ringtoneService.stop();
       _stopPollingCall();
       _stopIncomingCallWatcher();
+      _stopChatPolling();
       activeCall = null;
+      latestVoiceAssistantResult = null;
       profile = null;
       family = null;
       pendingInvitations = const [];
@@ -434,12 +482,12 @@ class AppController extends ChangeNotifier {
   }
 
   void _startIncomingCallWatcher() {
-    if (_incomingCallWatchTimer != null) {
+    if (_incomingCallWatchTimer != null || hasPushMessagingConfig) {
       return;
     }
 
     _incomingCallWatchTimer = Timer.periodic(
-      const Duration(seconds: AppConfig.callPollIntervalSeconds),
+      const Duration(seconds: AppConfig.incomingCallWatchIntervalSeconds),
       (_) async {
         await _refreshIncomingCalls();
       },
@@ -451,8 +499,50 @@ class AppController extends ChangeNotifier {
     _incomingCallWatchTimer = null;
   }
 
+  void _startChatPolling() {
+    if (_chatPollTimer != null) {
+      return;
+    }
+
+    _chatPollTimer = Timer.periodic(
+      const Duration(seconds: AppConfig.chatPollIntervalSeconds),
+      (_) async {
+        if (_chatPollBusy ||
+            stage != AppStage.home ||
+            activeChatPartnerUserId == null) {
+          return;
+        }
+
+        _chatPollBusy = true;
+        try {
+          await _refreshActiveChatMessages(allowAutoSelect: false);
+          notifyListeners();
+        } catch (_) {
+          // Keep polling active; a later tick can recover automatically.
+        } finally {
+          _chatPollBusy = false;
+        }
+      },
+    );
+  }
+
+  void _stopChatPolling() {
+    _chatPollTimer?.cancel();
+    _chatPollTimer = null;
+  }
+
+  void _syncChatPolling() {
+    if (stage == AppStage.home && activeChatPartnerUserId != null) {
+      _startChatPolling();
+    } else {
+      _stopChatPolling();
+    }
+  }
+
   Future<void> _refreshIncomingCalls() async {
-    if (_incomingCallWatchBusy || stage != AppStage.home) {
+    if (_incomingCallWatchBusy ||
+        stage != AppStage.home ||
+        hasPushMessagingConfig) {
       return;
     }
     if (activeCall != null && !_isCallFinished(activeCall)) {
@@ -478,6 +568,21 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  void _listenToPushTokenChanges() {
+    _pushTokenSubscription = _messagingService.tokenChanges.listen((_) async {
+      final currentUser = profile;
+      if (currentUser == null || stage != AppStage.home) {
+        return;
+      }
+
+      try {
+        await _syncAutomaticPushToken(currentUser);
+      } catch (_) {
+        // Ignore token sync hiccups; app reload or next token update can retry.
+      }
+    });
+  }
+
   Future<void> _consumeLaunchPushMessage() async {
     final launchMessage = _messagingService.launchMessage;
     if (launchMessage == null) {
@@ -494,11 +599,15 @@ class AppController extends ChangeNotifier {
     }
 
     try {
+      if (message.eventType == 'family_chat_message') {
+        await _handleIncomingChatPush(message);
+        return;
+      }
+
       if ({
         'family_invitation',
         'family_invitation_accepted',
         'family_invitation_declined',
-        'family_chat_message',
         'emotion_alert',
       }.contains(message.eventType)) {
         await loadHomeData();
@@ -510,7 +619,14 @@ class AppController extends ChangeNotifier {
         return;
       }
 
-      final session = await _apiService.getCallSession(callSessionId);
+      var session = await _apiService.getCallSession(callSessionId);
+      final currentUser = profile;
+      if (currentUser != null &&
+          message.openedFromNotification &&
+          session.canAccept(currentUser.id)) {
+        session = await _apiService.acceptCall(callSessionId);
+      }
+
       activeCall = session;
       _mergeCallIntoHistory(session);
       await _maybeJoinAcceptedCall(session);
@@ -519,6 +635,25 @@ class AppController extends ChangeNotifier {
     } catch (_) {
       // Ignore malformed or outdated push payloads.
     }
+  }
+
+  Future<void> _handleIncomingChatPush(CallPushMessage message) async {
+    final senderUserId =
+        int.tryParse('${message.payload['sender_user_id'] ?? ''}');
+    final recipientUserId =
+        int.tryParse('${message.payload['recipient_user_id'] ?? ''}');
+
+    await _refreshChatThreads();
+
+    final activePartnerId = activeChatPartnerUserId;
+    final shouldRefreshActiveThread = activePartnerId != null &&
+        (activePartnerId == senderUserId || activePartnerId == recipientUserId);
+
+    if (shouldRefreshActiveThread) {
+      await _refreshActiveChatMessages(allowAutoSelect: false);
+    }
+
+    notifyListeners();
   }
 
   Future<void> _syncRealtimeServices() async {
@@ -568,6 +703,7 @@ class AppController extends ChangeNotifier {
 
     if (partnerUserId == null) {
       activeChatMessages = const [];
+      _syncChatPolling();
       return;
     }
 
@@ -577,11 +713,13 @@ class AppController extends ChangeNotifier {
     if (!threadExists) {
       activeChatPartnerUserId = null;
       activeChatMessages = const [];
+      _syncChatPolling();
       return;
     }
 
     activeChatMessages = await _apiService.getFamilyChatMessages(partnerUserId);
     chatThreads = await _apiService.getFamilyChatThreads();
+    _syncChatPolling();
   }
 
   Future<void> _maybeJoinAcceptedCall(CallSession? session) async {
@@ -592,6 +730,7 @@ class AppController extends ChangeNotifier {
       return;
     }
 
+    await _ringtoneService.stop();
     await _callService.joinAudioCall(
       user: currentUser,
       session: session,
@@ -635,13 +774,14 @@ class AppController extends ChangeNotifier {
     }
 
     activeCall = resolvedCall;
+    _syncIncomingCallRingtone();
     if (activeCall != null && !_isCallFinished(activeCall)) {
       _stopIncomingCallWatcher();
       _startPollingCall();
     } else {
       _stopPollingCall();
       _callService.clearActiveCall();
-      if (stage == AppStage.home) {
+      if (stage == AppStage.home && !hasPushMessagingConfig) {
         _startIncomingCallWatcher();
       } else {
         _stopIncomingCallWatcher();
@@ -662,11 +802,23 @@ class AppController extends ChangeNotifier {
     return session == null || session.isFinished;
   }
 
+  void _syncIncomingCallRingtone() {
+    final currentUser = profile;
+    final session = activeCall;
+    final shouldRing = currentUser != null &&
+        session != null &&
+        session.canAccept(currentUser.id);
+    unawaited(_ringtoneService.sync(shouldRing: shouldRing));
+  }
+
   @override
   void dispose() {
+    unawaited(_ringtoneService.stop());
     _stopPollingCall();
     _stopIncomingCallWatcher();
+    _stopChatPolling();
     _pushSubscription?.cancel();
+    _pushTokenSubscription?.cancel();
     _callService.uninitialize();
     _messagingService.dispose();
     super.dispose();

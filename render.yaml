@@ -18,3 +18,7 @@ services:
         value: "30"
       - key: CALL_MAX_TARGETS
         value: "3"
+      - key: ANDROID_APP_DOWNLOAD_URL
+        value: ""
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false

@@ -3,6 +3,7 @@ import 'dart:io';
 class AppConfig {
   const AppConfig._();
 
+  static const String releaseLabel = 'build-2026-03-27-r2';
   static const String productionBaseUrl = 'https://voice-by.onrender.com';
   static const String localAndroidEmulatorBaseUrl = 'http://10.0.2.2:5000';
   static const String localIosSimulatorBaseUrl = 'http://127.0.0.1:5000';
@@ -14,6 +15,22 @@ class AppConfig {
   static const int callPollIntervalSeconds = int.fromEnvironment(
     'CALL_POLL_INTERVAL_SECONDS',
     defaultValue: 5,
+  );
+  static const int incomingCallWatchIntervalSeconds = int.fromEnvironment(
+    'INCOMING_CALL_WATCH_INTERVAL_SECONDS',
+    defaultValue: 30,
+  );
+  static const int chatPollIntervalSeconds = int.fromEnvironment(
+    'CHAT_POLL_INTERVAL_SECONDS',
+    defaultValue: 3,
+  );
+  static const int connectTimeoutSeconds = int.fromEnvironment(
+    'CONNECT_TIMEOUT_SECONDS',
+    defaultValue: 30,
+  );
+  static const int receiveTimeoutSeconds = int.fromEnvironment(
+    'RECEIVE_TIMEOUT_SECONDS',
+    defaultValue: 60,
   );
 
   // Supply these via --dart-define when you are ready to test realtime calls.

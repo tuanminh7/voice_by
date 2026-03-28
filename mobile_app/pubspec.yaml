@@ -18,6 +18,8 @@ dependencies:
   cookie_jar: any
   path_provider: any
   speech_to_text: any
+  flutter_tts: any
+  flutter_ringtone_player: any
   firebase_core: any
   firebase_messaging: any
   zego_uikit_prebuilt_call: any

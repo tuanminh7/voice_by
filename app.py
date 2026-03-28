@@ -134,6 +134,7 @@ def init_db() -> None:
         email TEXT NOT NULL UNIQUE,
         phone_number TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL,
+        care_role_key TEXT NOT NULL DEFAULT '',
         gemini_api_key TEXT NOT NULL DEFAULT '',
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
@@ -321,6 +322,8 @@ def init_db() -> None:
     }
     if "gemini_api_key" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN gemini_api_key TEXT NOT NULL DEFAULT ''")
+    if "care_role_key" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN care_role_key TEXT NOT NULL DEFAULT ''")
 
     relationship_columns = {
         row["name"]
@@ -673,6 +676,8 @@ def update_me():
     age_raw = str(payload.get("age") or "").strip()
     email = normalize_email(payload.get("email") or "")
     phone_number = normalize_phone(payload.get("phone_number") or "")
+    raw_care_role_key = payload.get("care_role_key")
+    care_role_key = normalize_relationship_key(raw_care_role_key or "")
 
     if not full_name:
         return json_error("Bạn chưa nhập họ tên.", 400, "invalid_full_name")
@@ -686,6 +691,8 @@ def update_me():
         return json_error("Email chưa đúng định dạng.", 400, "invalid_email")
     if not validate_phone(phone_number):
         return json_error("Số điện thoại chưa đúng định dạng.", 400, "invalid_phone")
+    if raw_care_role_key is not None and care_role_key and care_role_key not in RELATIONSHIP_LABELS:
+        return json_error("Vai vế gia đình chưa hợp lệ.", 400, "invalid_care_role")
 
     email_owner = fetch_user_by_email(email)
     if email_owner and email_owner["id"] != g.current_user["id"]:
@@ -699,10 +706,10 @@ def update_me():
     get_db().execute(
         """
         UPDATE users
-        SET full_name = ?, age = ?, email = ?, phone_number = ?, updated_at = ?
+        SET full_name = ?, age = ?, email = ?, phone_number = ?, care_role_key = ?, updated_at = ?
         WHERE id = ?
         """,
-        (full_name, age, email, phone_number, now, g.current_user["id"]),
+        (full_name, age, email, phone_number, care_role_key, now, g.current_user["id"]),
     )
     get_db().commit()
     g.current_user = fetch_user_by_id(g.current_user["id"])
@@ -1863,6 +1870,7 @@ def register():
     email = normalize_email(payload.get("email") or "")
     phone_number = normalize_phone(payload.get("phone_number") or "")
     password = payload.get("password") or ""
+    care_role_key = normalize_relationship_key(payload.get("care_role_key") or "")
     device_id = normalize_device_id(payload.get("device_id") or "")
     device_name = (payload.get("device_name") or "Thiết bị chưa đặt tên").strip()[:120]
 
@@ -1880,6 +1888,8 @@ def register():
         return json_error("Số điện thoại chưa đúng định dạng.", 400, "invalid_phone")
     if not validate_password(password):
         return json_error("Mật khẩu cần ít nhất 6 ký tự.", 400, "invalid_password")
+    if care_role_key and care_role_key not in RELATIONSHIP_LABELS:
+        return json_error("Vai vế gia đình chưa hợp lệ.", 400, "invalid_care_role")
     if not device_id:
         return json_error("Thiếu thông tin thiết bị để ghi nhớ đăng nhập.", 400, "missing_device")
     if fetch_user_by_email(email):
@@ -1893,6 +1903,7 @@ def register():
         email=email,
         phone_number=phone_number,
         password_hash_value=generate_password_hash(password),
+        care_role_key=care_role_key,
     )
     login_user_session(user_row, device_id, device_name)
 
@@ -1941,15 +1952,16 @@ def save_user(
     email: str,
     phone_number: str,
     password_hash_value: str,
+    care_role_key: str = "",
 ) -> sqlite3.Row:
     now = utcnow_iso()
     db = get_db()
     cursor = db.execute(
         """
-        INSERT INTO users (full_name, age, email, phone_number, password_hash, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO users (full_name, age, email, phone_number, password_hash, care_role_key, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (full_name, age, email, phone_number, password_hash_value, now, now),
+        (full_name, age, email, phone_number, password_hash_value, care_role_key, now, now),
     )
     db.commit()
     return fetch_user_by_id(cursor.lastrowid)
@@ -2078,12 +2090,15 @@ def get_personal_gemini_api_key(user_row: sqlite3.Row | None) -> str:
 
 def serialize_user(user_row: sqlite3.Row) -> dict:
     personal_key = get_personal_gemini_api_key(user_row)
+    care_role_key = (user_row["care_role_key"] or "").strip()
     return {
         "id": user_row["id"],
         "full_name": user_row["full_name"],
         "age": user_row["age"],
         "email": user_row["email"],
         "phone_number": user_row["phone_number"],
+        "care_role_key": care_role_key,
+        "care_role_label": RELATIONSHIP_LABELS.get(care_role_key, ""),
         "created_at": user_row["created_at"],
         "updated_at": user_row["updated_at"],
         "has_personal_gemini_key": bool(personal_key),
@@ -2348,6 +2363,10 @@ def normalize_relationship_key(value: str) -> str:
 def get_user_care_role_key(user_row: sqlite3.Row | None) -> str | None:
     if user_row is None:
         return None
+
+    saved_role_key = normalize_relationship_key(user_row["care_role_key"] or "")
+    if saved_role_key in RELATIONSHIP_LABELS:
+        return saved_role_key
 
     membership = get_active_family_membership(user_row["id"])
     if membership:
@@ -2888,6 +2907,7 @@ def create_family_chat_message(sender_user_id: int, recipient_user_id: int, mess
             "sender_user_id": sender_user_id,
             "recipient_user_id": recipient_user_id,
         },
+        channel_id="family_chat",
     )
     return payload
 
@@ -3115,6 +3135,7 @@ def send_push_notification(
     title: str,
     body: str,
     data: dict | None = None,
+    channel_id: str = "icare_updates",
 ) -> None:
     firebase_app = get_firebase_push_app()
     if firebase_app is None or firebase_messaging is None:
@@ -3145,7 +3166,7 @@ def send_push_notification(
             priority="high",
             notification=firebase_messaging.AndroidNotification(
                 sound="default",
-                channel_id="emergency_calls",
+                channel_id=channel_id,
             ),
         ),
         apns=firebase_messaging.APNSConfig(
@@ -3283,6 +3304,7 @@ def start_next_call_target(call_session_id: int) -> sqlite3.Row | None:
             "relationship_key": target_row["relationship_key"],
             "caller_name": caller_row["full_name"] if caller_row else None,
         },
+        channel_id="incoming_calls",
     )
     return fetch_call_session(call_session_id)
 

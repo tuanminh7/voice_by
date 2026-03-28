@@ -31,8 +31,9 @@ class ApiService {
     final dio = Dio(
       BaseOptions(
         baseUrl: AppConfig.baseUrl,
-        connectTimeout: const Duration(seconds: 15),
-        receiveTimeout: const Duration(seconds: 15),
+        connectTimeout: Duration(seconds: AppConfig.connectTimeoutSeconds),
+        receiveTimeout: Duration(seconds: AppConfig.receiveTimeoutSeconds),
+        sendTimeout: Duration(seconds: AppConfig.connectTimeoutSeconds),
         headers: {
           HttpHeaders.contentTypeHeader: 'application/json',
           HttpHeaders.userAgentHeader:
@@ -69,6 +70,11 @@ class ApiService {
         return ApiException(data['error'] as String);
       }
       if (_isConnectionError(error)) {
+        if (error.type == DioExceptionType.receiveTimeout) {
+          return ApiException(
+            'Server đang phản hồi chậm hoặc đang khởi động lại. Nếu đang dùng Render, bạn hãy đợi thêm khoảng 20-60 giây rồi thử lại.\n\n${AppConfig.backendConnectionHint}',
+          );
+        }
         final rawMessage = [
           error.message,
           if (error.error is SocketException)
@@ -84,6 +90,8 @@ class ApiService {
   bool _isConnectionError(DioException error) {
     return error.type == DioExceptionType.connectionError ||
         error.type == DioExceptionType.connectionTimeout ||
+        error.type == DioExceptionType.receiveTimeout ||
+        error.type == DioExceptionType.sendTimeout ||
         error.error is SocketException;
   }
 
@@ -104,6 +112,9 @@ class ApiService {
     } else if (normalizedMessage.contains('timed out')) {
       reason =
           'Ket noi toi backend bi het thoi gian cho. Hay kiem tra mang giua thiet bi va may chay Flask.';
+    } else if (normalizedMessage.contains('receive timeout')) {
+      reason =
+          'Server dang phan hoi cham hoac dang khoi dong lai. Neu ban dang dung Render, hay doi them 20-60 giay roi thu lai.';
     }
 
     return '$reason\n\n${AppConfig.backendConnectionHint}';
@@ -148,6 +159,7 @@ class ApiService {
     required String email,
     required String phoneNumber,
     required String password,
+    required String careRoleKey,
     required String deviceId,
     required String deviceName,
   }) async {
@@ -160,6 +172,7 @@ class ApiService {
           'email': email,
           'phone_number': phoneNumber,
           'password': password,
+          'care_role_key': careRoleKey,
           'device_id': deviceId,
           'device_name': deviceName,
         },
@@ -441,7 +454,8 @@ class ApiService {
     }
   }
 
-  Future<List<FamilyChatMessage>> getFamilyChatMessages(int partnerUserId) async {
+  Future<List<FamilyChatMessage>> getFamilyChatMessages(
+      int partnerUserId) async {
     try {
       final response = await _dio.get<Map<String, dynamic>>(
         '/api/family-chat/messages',
@@ -479,20 +493,13 @@ class ApiService {
     }
   }
 
-  Future<CallSession> createVoiceCall(String transcriptText) async {
+  Future<VoiceAssistantResult> submitVoiceInput(String transcriptText) async {
     try {
       final response = await _dio.post<Map<String, dynamic>>(
         '/api/calls/voice-intent',
         data: {'transcript_text': transcriptText},
       );
-      final action = (response.data ?? const {})['action'] as String? ?? '';
-      if (action != 'calling') {
-        throw ApiException((response.data ?? const {})['question'] as String? ??
-            'He thong chua tao duoc cuoc goi.');
-      }
-      return CallSession.fromJson(
-          (response.data ?? const {})['call'] as Map<String, dynamic>? ??
-              const {});
+      return VoiceAssistantResult.fromJson(response.data ?? const {});
     } catch (error) {
       throw _toApiException(error);
     }
@@ -556,6 +563,21 @@ class ApiService {
       return CallSession.fromJson(
           (response.data ?? const {})['call'] as Map<String, dynamic>? ??
               const {});
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
+  Future<CallSession> createManualCall(String relationshipKey) async {
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/api/calls',
+        data: {'relationship_key': relationshipKey},
+      );
+      return CallSession.fromJson(
+        (response.data ?? const {})['call'] as Map<String, dynamic>? ??
+            const {},
+      );
     } catch (error) {
       throw _toApiException(error);
     }
