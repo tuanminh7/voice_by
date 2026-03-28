@@ -110,6 +110,41 @@ def close_db(_exception=None) -> None:
         connection.close()
 
 
+def _truncate_log_value(value, *, limit: int = 160):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        compact = value.replace("\n", " ").replace("\r", " ").strip()
+        return compact if len(compact) <= limit else f"{compact[:limit]}..."
+    if isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)
+        return [_truncate_log_value(item, limit=limit) for item in items[:6]]
+    if isinstance(value, dict):
+        return {
+            str(key): _truncate_log_value(item, limit=limit)
+            for key, item in list(value.items())[:12]
+        }
+    return _truncate_log_value(str(value), limit=limit)
+
+
+
+def log_mobile_diag(event: str, *, level: str = "info", **fields) -> None:
+    payload = {
+        "event": event,
+        "path": request.path,
+        "method": request.method,
+        "user_id": g.current_user["id"] if getattr(g, "current_user", None) else None,
+        "device_id": g.current_device["device_id"] if getattr(g, "current_device", None) else None,
+        "client_source": (request.headers.get("X-Client-Source", "") or "").strip() or None,
+        "client_platform": (request.headers.get("X-Client-Platform", "") or "").strip() or None,
+    }
+    payload.update({key: _truncate_log_value(value) for key, value in fields.items() if value is not None})
+    message = "MOBILE_DIAG " + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    getattr(app.logger, level, app.logger.info)(message)
+
+
 @app.before_request
 def log_native_client_request() -> None:
     client_source = (request.headers.get("X-Client-Source", "") or "").strip()
@@ -123,6 +158,23 @@ def log_native_client_request() -> None:
         request.path,
         request.method,
     )
+
+
+@app.after_request
+def log_mobile_api_errors(response):
+    client_source = (request.headers.get("X-Client-Source", "") or "").strip()
+    if not client_source or not request.path.startswith("/api/") or response.status_code < 400:
+        return response
+
+    payload = response.get_json(silent=True) or {}
+    log_mobile_diag(
+        "api_response_error",
+        level="warning",
+        status_code=response.status_code,
+        error=payload.get("error"),
+        error_code=payload.get("code"),
+    )
+    return response
 
 
 def init_db() -> None:
@@ -447,6 +499,7 @@ def login_required(view_func):
     @wraps(view_func)
     def wrapped(*args, **kwargs):
         if g.current_user is None or g.current_device is None:
+            log_mobile_diag("auth_required_blocked", level="warning")
             return json_error("Bạn cần đăng nhập trước.", 401, "auth_required")
         return view_func(*args, **kwargs)
 
@@ -457,13 +510,16 @@ def pin_required(view_func):
     @wraps(view_func)
     def wrapped(*args, **kwargs):
         if g.current_user is None or g.current_device is None:
+            log_mobile_diag("auth_required_blocked", level="warning")
             return json_error("Bạn cần đăng nhập trước.", 401, "auth_required")
 
         if not g.current_device["pin_enabled"]:
+            log_mobile_diag("pin_not_configured", level="warning")
             return json_error("Thiết bị này chưa thiết lập PIN 4 số.", 403, "pin_not_configured")
 
         pin_token = request.headers.get("X-PIN-Token", "").strip()
         if not validate_pin_token(pin_token, g.current_user["id"], g.current_device["device_id"]):
+            log_mobile_diag("pin_required_blocked", level="warning", pin_token_present=bool(pin_token))
             return json_error("Bạn cần nhập PIN để mở khóa ứng dụng.", 403, "pin_required")
 
         mark_device_seen(g.current_device)
@@ -1053,9 +1109,22 @@ def register_device_push_token():
     platform = (payload.get("platform") or "").strip().lower()
 
     if not push_token:
-        return json_error("Thiếu push token của thiết bị.", 400, "missing_push_token")
+        return json_error("Thiáº¿u push token cá»§a thiáº¿t bá»‹.", 400, "missing_push_token")
     if platform not in {"android", "ios"}:
-        return json_error("Platform chỉ hỗ trợ android hoặc ios.", 400, "invalid_platform")
+        return json_error("Platform chá»‰ há»— trá»£ android hoáº·c ios.", 400, "invalid_platform")
+
+    now = utcnow_iso()
+    db = get_db()
+    db.execute(
+        """
+        UPDATE device_push_tokens
+        SET is_active = 0, updated_at = ?
+        WHERE is_active = 1
+          AND (device_id = ? OR push_token = ?)
+          AND NOT (user_id = ? AND device_id = ? AND push_token = ?)
+        """,
+        (now, g.current_device["device_id"], push_token, g.current_user["id"], g.current_device["device_id"], push_token),
+    )
 
     existing = fetch_one(
         """
@@ -1065,9 +1134,8 @@ def register_device_push_token():
         (g.current_user["id"], g.current_device["device_id"], push_token),
     )
 
-    now = utcnow_iso()
     if existing:
-        get_db().execute(
+        db.execute(
             """
             UPDATE device_push_tokens
             SET is_active = 1, platform = ?, updated_at = ?
@@ -1076,7 +1144,7 @@ def register_device_push_token():
             (platform, now, existing["id"]),
         )
     else:
-        get_db().execute(
+        db.execute(
             """
             INSERT INTO device_push_tokens (user_id, device_id, platform, push_token, is_active, created_at, updated_at)
             VALUES (?, ?, ?, ?, 1, ?, ?)
@@ -1084,8 +1152,40 @@ def register_device_push_token():
             (g.current_user["id"], g.current_device["device_id"], platform, push_token, now, now),
         )
 
+    db.commit()
+    log_mobile_diag("push_token_registered", token_suffix=push_token[-12:], platform=platform)
+    return jsonify({"message": "ÄÃ£ lÆ°u push token cho thiáº¿t bá»‹.", "provider": CALL_PROVIDER})
+
+
+@app.route("/api/device-push-tokens/unregister", methods=["POST"])
+@pin_required
+def unregister_device_push_token():
+    payload = request.get_json(silent=True) or {}
+    push_token = (payload.get("push_token") or "").strip()
+    now = utcnow_iso()
+
+    if push_token:
+        get_db().execute(
+            """
+            UPDATE device_push_tokens
+            SET is_active = 0, updated_at = ?
+            WHERE user_id = ? AND device_id = ? AND push_token = ?
+            """,
+            (now, g.current_user["id"], g.current_device["device_id"], push_token),
+        )
+    else:
+        get_db().execute(
+            """
+            UPDATE device_push_tokens
+            SET is_active = 0, updated_at = ?
+            WHERE user_id = ? AND device_id = ?
+            """,
+            (now, g.current_user["id"], g.current_device["device_id"]),
+        )
+
     get_db().commit()
-    return jsonify({"message": "Đã lưu push token cho thiết bị.", "provider": CALL_PROVIDER})
+    log_mobile_diag("push_token_unregistered", token_suffix=push_token[-12:] if push_token else None, cleared_all=not bool(push_token))
+    return jsonify({"message": "ÄÃ£ gá»¡ push token cho thiáº¿t bá»‹.", "provider": CALL_PROVIDER})
 
 
 @app.route("/api/emotions/dashboard", methods=["GET"])
@@ -1140,6 +1240,7 @@ def send_family_chat_message():
     if message_payload is None:
         return json_error("Không thể nhắn tin cho người này trong gia đình.", 404, "chat_partner_not_found")
 
+    log_mobile_diag("family_chat_sent", recipient_user_id=int(recipient_user_id_raw), message_id=message_payload["id"], message_preview=message_text[:120])
     return jsonify({"message": "Đã gửi tin nhắn.", "chat_message": message_payload})
 
 
@@ -1513,6 +1614,7 @@ def create_manual_call():
     if not session_row:
         return json_error("Không tìm thấy người nhận phù hợp cho cuộc gọi này.", 404, "call_target_not_found")
 
+    log_mobile_diag("manual_call_created", relationship_key=relationship_key, call_session_id=session_row["id"])
     return jsonify({"message": "Đã tạo cuộc gọi khẩn cấp.", "call": build_call_session_payload(session_row["id"])})
 
 
@@ -1585,6 +1687,7 @@ def accept_call_session(call_session_id: int):
         accepted_at=now,
     )
     create_call_event(call_session_id, "call_accepted", actor_user_id=g.current_user["id"])
+    log_mobile_diag("call_accepted", call_session_id=call_session_id, target_user_id=g.current_user["id"])
     return jsonify({"message": "Đã nhận cuộc gọi.", "call": build_call_session_payload(call_session_id)})
 
 
@@ -1618,6 +1721,7 @@ def decline_call_session(call_session_id: int):
     get_db().commit()
     create_call_event(call_session_id, "call_declined", actor_user_id=g.current_user["id"])
     advance_call_session_if_needed(call_session_id)
+    log_mobile_diag("call_declined", call_session_id=call_session_id, target_user_id=g.current_user["id"])
     return jsonify({"message": "Đã từ chối cuộc gọi.", "call": build_call_session_payload(call_session_id)})
 
 
@@ -1640,6 +1744,7 @@ def end_call_session(call_session_id: int):
         end_reason="ended_by_user",
     )
     create_call_event(call_session_id, "call_ended", actor_user_id=g.current_user["id"])
+    log_mobile_diag("call_ended", call_session_id=call_session_id, actor_user_id=g.current_user["id"], previous_status=session_row["status"])
     return jsonify({"message": "Đã kết thúc cuộc gọi.", "call": build_call_session_payload(call_session_id)})
 
 
@@ -2081,11 +2186,17 @@ def logout_user_session() -> None:
     device_id = session.get("device_id")
 
     if user_id and device_id:
-        get_db().execute(
+        now = utcnow_iso()
+        db = get_db()
+        db.execute(
             "UPDATE user_devices SET is_revoked = 1, updated_at = ? WHERE user_id = ? AND device_id = ?",
-            (utcnow_iso(), user_id, device_id),
+            (now, user_id, device_id),
         )
-        get_db().commit()
+        db.execute(
+            "UPDATE device_push_tokens SET is_active = 0, updated_at = ? WHERE user_id = ? AND device_id = ?",
+            (now, user_id, device_id),
+        )
+        db.commit()
 
     session.clear()
     g.current_user = None
@@ -3232,6 +3343,7 @@ def create_family_chat_message(sender_user_id: int, recipient_user_id: int, mess
         },
         channel_id="family_chat",
     )
+    log_mobile_diag("family_chat_push_enqueued", sender_user_id=sender_user_id, recipient_user_id=recipient_user_id, message_id=payload["id"], message_preview=message_text[:120])
     return payload
 
 
@@ -3609,6 +3721,7 @@ def start_next_call_target(call_session_id: int) -> sqlite3.Row | None:
     )
     get_db().commit()
 
+    log_mobile_diag("call_target_ringing", call_session_id=call_session_id, target_user_id=target_row["target_user_id"], priority_order=target_row["priority_order"], push_token_count=len(list_push_tokens_for_user(target_row["target_user_id"])))
     create_call_event(
         call_session_id,
         "target_ringing",
@@ -3659,6 +3772,7 @@ def advance_call_session_if_needed(call_session_id: int) -> sqlite3.Row | None:
                     "priority_order": current_target["priority_order"],
                 },
             )
+            log_mobile_diag("call_target_timeout", call_session_id=call_session_id, target_user_id=current_target["target_user_id"], priority_order=current_target["priority_order"])
             return start_next_call_target(call_session_id)
         return session_row
 
