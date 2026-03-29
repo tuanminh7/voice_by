@@ -2581,6 +2581,114 @@ def extract_voice_message_command(text: str) -> dict | None:
     return None
 
 
+
+def extract_voice_message_command_without_separator(text: str, owner_user_id: int) -> dict | None:
+    normalized_text = " ".join((text or "").strip().split())
+    if not normalized_text:
+        return None
+
+    original_tokens = normalized_text.split()
+    simplified_tokens = simplify_text(normalized_text).split()
+    if len(original_tokens) != len(simplified_tokens):
+        return None
+
+    def consume_prefix(prefix_tokens: list[str]) -> bool:
+        nonlocal original_tokens, simplified_tokens
+        if simplified_tokens[: len(prefix_tokens)] != prefix_tokens:
+            return False
+        original_tokens = original_tokens[len(prefix_tokens) :]
+        simplified_tokens = simplified_tokens[len(prefix_tokens) :]
+        return True
+
+    for prefix_tokens in (
+        ["ban"],
+        ["icare"],
+        ["bot"],
+        ["tro", "ly"],
+    ):
+        if consume_prefix(prefix_tokens):
+            break
+
+    for prefix_tokens in (
+        ["hay"],
+        ["giup"],
+        ["vui", "long"],
+    ):
+        if consume_prefix(prefix_tokens):
+            break
+
+    command_detected = False
+    for prefix_tokens in (
+        ["gui", "tin", "nhan", "cho"],
+        ["gui", "loi", "nhan", "cho"],
+        ["nhan", "cho"],
+        ["nhan", "giup"],
+        ["bao"],
+        ["noi", "voi"],
+        ["nhac"],
+    ):
+        if consume_prefix(prefix_tokens):
+            command_detected = True
+            break
+
+    if not command_detected or len(original_tokens) < 2:
+        return None
+
+    filler_tokens = {"bac", "ong", "ba", "a", "ah", "nhe", "nha", "oi", "voi"}
+    best_match = None
+    candidates = list_voice_message_target_candidates(owner_user_id)
+    for candidate in candidates:
+        alias_candidates = [candidate["full_name"], *candidate["custom_aliases"]]
+        if candidate.get("care_role_key"):
+            alias_candidates.extend(iter_relationship_aliases(candidate["care_role_key"]))
+        for relationship_key in candidate.get("relationship_keys") or []:
+            alias_candidates.extend(iter_relationship_aliases(relationship_key))
+
+        seen_aliases: set[str] = set()
+        for alias in alias_candidates:
+            simplified_alias = clean_voice_target_hint(alias)
+            if not simplified_alias or simplified_alias in seen_aliases:
+                continue
+            seen_aliases.add(simplified_alias)
+
+            alias_tokens = simplified_alias.split()
+            if not alias_tokens or simplified_tokens[: len(alias_tokens)] != alias_tokens:
+                continue
+
+            consumed_count = len(alias_tokens)
+            while consumed_count < len(simplified_tokens) - 1 and simplified_tokens[consumed_count] in filler_tokens:
+                consumed_count += 1
+
+            message_tokens = original_tokens[consumed_count:]
+            if not message_tokens:
+                continue
+
+            match = {
+                "target_hint": " ".join(original_tokens[:consumed_count]).strip(" ,:;.!?-"),
+                "message_text": " ".join(message_tokens).strip().strip("\"'"),
+                "consumed_count": consumed_count,
+                "alias_length": len(alias_tokens),
+            }
+            if not match["message_text"]:
+                continue
+
+            if best_match is None or (
+                match["alias_length"] > best_match["alias_length"]
+                or (
+                    match["alias_length"] == best_match["alias_length"]
+                    and match["consumed_count"] < best_match["consumed_count"]
+                )
+            ):
+                best_match = match
+
+    if not best_match:
+        return None
+
+    return {
+        "target_hint": best_match["target_hint"],
+        "message_text": best_match["message_text"],
+    }
+
 def clean_voice_target_hint(value: str) -> str:
     simplified = simplify_text(value)
     simplified = re.sub(r"\b(cua toi|toi|oi|nhe|nha|dum|dum nhe|giup toi)\b", " ", simplified)
@@ -2771,6 +2879,8 @@ def resolve_voice_message_target(owner_user_id: int, target_hint: str) -> dict:
 
 def detect_family_chat_intent(text: str, owner_user_id: int) -> dict:
     command = extract_voice_message_command(text)
+    if command is None:
+        command = extract_voice_message_command_without_separator(text, owner_user_id)
     if command is None:
         return {"type": "chat"}
 

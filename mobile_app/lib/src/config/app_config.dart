@@ -33,14 +33,14 @@ class AppConfig {
     defaultValue: 60,
   );
 
-  // Supply these via --dart-define when you are ready to test realtime calls.
+  // Test credentials are embedded here; --dart-define can still override them.
   static const int zegoAppId = int.fromEnvironment(
     'ZEGO_APP_ID',
-    defaultValue: 0,
+    defaultValue: 2012540145,
   );
   static const String zegoAppSign = String.fromEnvironment(
     'ZEGO_APP_SIGN',
-    defaultValue: '',
+    defaultValue: '9a246e48a76ebe91abca379fc6d03bba9a81318a7dd5dc3c582ccbef7f26e5ba',
   );
   static const String zegoPushResourceId = String.fromEnvironment(
     'ZEGO_PUSH_RESOURCE_ID',

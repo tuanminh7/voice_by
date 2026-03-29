@@ -57,13 +57,26 @@ class AppController extends ChangeNotifier {
   Timer? _chatPollTimer;
   StreamSubscription<CallPushMessage>? _pushSubscription;
   StreamSubscription<String>? _pushTokenSubscription;
+  bool _callPollBusy = false;
   bool _incomingCallWatchBusy = false;
   bool _chatPollBusy = false;
+  bool _homeRealtimeSyncBusy = false;
+  bool _homeRealtimeSyncQueued = false;
 
   bool get hasRealtimeCallConfig => _callService.isConfigured;
   bool get hasPushMessagingConfig => _messagingService.isAvailable;
   String? get autoPushToken => _messagingService.deviceToken;
   String? get pushStatusMessage => _messagingService.availabilityMessage;
+  bool get _hasRegisteredPushTokenForCurrentUser {
+    final currentUser = profile;
+    final token = autoPushToken;
+    return currentUser != null &&
+        token != null &&
+        token.isNotEmpty &&
+        _store.pushTokenUserId == currentUser.id &&
+        _store.pushToken == token;
+  }
+
   FamilyChatThread? get activeChatThread {
     final partnerUserId = activeChatPartnerUserId;
     if (partnerUserId == null) {
@@ -113,8 +126,7 @@ class AppController extends ChangeNotifier {
       } else if ((_store.pinToken ?? '').isEmpty) {
         stage = AppStage.pinUnlock;
       } else {
-        stage = AppStage.home;
-        await loadHomeData();
+        _enterHome();
       }
       errorMessage = null;
     } catch (error) {
@@ -131,7 +143,9 @@ class AppController extends ChangeNotifier {
     try {
       await action();
     } catch (error) {
-      errorMessage = error.toString();
+      if (!await _recoverFromApiError(error)) {
+        errorMessage = error.toString();
+      }
     } finally {
       busy = false;
       notifyListeners();
@@ -149,6 +163,65 @@ class AppController extends ChangeNotifier {
     }
     _showRealtimeCallSetupError();
     return false;
+  }
+
+  Future<bool> _recoverFromApiError(Object error) async {
+    if (error is! ApiException) {
+      return false;
+    }
+
+    if (error.isAuthRequired) {
+      await _moveToAuthState(error.message);
+      return true;
+    }
+    if (error.isPinRequired) {
+      await _moveToPinState(AppStage.pinUnlock, error.message);
+      return true;
+    }
+    if (error.isPinNotConfigured) {
+      await _moveToPinState(AppStage.pinSetup, error.message);
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> _moveToAuthState(String message) async {
+    await _store.savePinToken(null);
+    await _store.clearPushTokenRegistration();
+    await _ringtoneService.stop();
+    _stopPollingCall();
+    _stopIncomingCallWatcher();
+    _stopChatPolling();
+    _callService.clearActiveCall();
+    bootstrapState = null;
+    profile = null;
+    family = null;
+    pendingInvitations = const [];
+    relationships = const [];
+    relationshipOptions = const [];
+    emotionDashboard = null;
+    chatThreads = const [];
+    activeChatMessages = const [];
+    activeChatPartnerUserId = null;
+    callHistory = const [];
+    activeCall = null;
+    latestVoiceAssistantResult = null;
+    stage = AppStage.auth;
+    errorMessage = message;
+    notifyListeners();
+  }
+
+  Future<void> _moveToPinState(AppStage nextStage, String message) async {
+    await _store.savePinToken(null);
+    await _ringtoneService.stop();
+    _stopPollingCall();
+    _stopIncomingCallWatcher();
+    _stopChatPolling();
+    _callService.clearActiveCall();
+    activeCall = null;
+    stage = nextStage;
+    errorMessage = message;
+    notifyListeners();
   }
 
   Future<void> login({
@@ -194,17 +267,32 @@ class AppController extends ChangeNotifier {
   Future<void> setupPin(String pin, String confirmPin) async {
     await _runBusy(() async {
       await _apiService.setupPin(pin, confirmPin);
-      stage = AppStage.home;
-      await loadHomeData();
+      _enterHome();
     });
   }
 
   Future<void> unlockWithPin(String pin) async {
     await _runBusy(() async {
       await _apiService.verifyPin(pin);
-      stage = AppStage.home;
-      await loadHomeData();
+      _enterHome();
     });
+  }
+
+  void _enterHome() {
+    stage = AppStage.home;
+    notifyListeners();
+    unawaited(_loadHomeDataInBackground());
+  }
+
+  Future<void> _loadHomeDataInBackground() async {
+    try {
+      await loadHomeData();
+    } catch (error) {
+      if (!await _recoverFromApiError(error) && stage == AppStage.home) {
+        errorMessage = error.toString();
+        notifyListeners();
+      }
+    }
   }
 
   Future<void> loadHomeData() async {
@@ -227,9 +315,16 @@ class AppController extends ChangeNotifier {
     callHistory = results[4] as List<CallSession>;
 
     if (family != null) {
-      emotionDashboard = await _apiService.getEmotionDashboard();
+      emotionDashboard = family!.role == 'admin'
+          ? await _apiService.getEmotionDashboard()
+          : null;
       chatThreads = await _apiService.getFamilyChatThreads();
-      await _refreshActiveChatMessages(allowAutoSelect: true);
+      if (activeChatPartnerUserId != null) {
+        await _refreshActiveChatMessages(allowAutoSelect: false);
+      } else {
+        activeChatMessages = const [];
+        _syncChatPolling();
+      }
     } else {
       emotionDashboard = null;
       chatThreads = const [];
@@ -238,10 +333,9 @@ class AppController extends ChangeNotifier {
       _syncChatPolling();
     }
 
-    await _syncRealtimeServices();
     _syncActiveCallFromHistory();
-    await _consumeLaunchPushMessage();
     notifyListeners();
+    _scheduleHomeRealtimeSync();
   }
 
   Future<void> saveRelationship({
@@ -449,13 +543,28 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    final registeredPushToken = _store.pushToken;
     await _runBusy(() async {
-      await _apiService.logout();
+      if (registeredPushToken != null && registeredPushToken.isNotEmpty) {
+        try {
+          await _apiService.unregisterPushToken(pushToken: registeredPushToken);
+        } catch (_) {
+          // Continue with local logout even if push token cleanup fails.
+        }
+      }
+      try {
+        await _apiService.logout();
+      } catch (_) {
+        // Continue with local logout even if backend logout fails.
+      }
+      await _store.savePinToken(null);
+      await _store.clearPushTokenRegistration();
       await _callService.uninitialize();
       await _ringtoneService.stop();
       _stopPollingCall();
       _stopIncomingCallWatcher();
       _stopChatPolling();
+      bootstrapState = null;
       activeCall = null;
       latestVoiceAssistantResult = null;
       profile = null;
@@ -482,15 +591,21 @@ class AppController extends ChangeNotifier {
           _stopPollingCall();
           return;
         }
+        if (_callPollBusy || stage != AppStage.home) {
+          return;
+        }
 
+        _callPollBusy = true;
         try {
           activeCall = await _apiService.getCallSession(session.callSessionId);
           _mergeCallIntoHistory(activeCall!);
           await _maybeJoinAcceptedCall(activeCall);
           _syncActiveCallFromHistory();
           notifyListeners();
-        } catch (_) {
-          _stopPollingCall();
+        } catch (error) {
+          await _recoverFromApiError(error);
+        } finally {
+          _callPollBusy = false;
         }
       },
     );
@@ -499,10 +614,12 @@ class AppController extends ChangeNotifier {
   void _stopPollingCall() {
     _callPollTimer?.cancel();
     _callPollTimer = null;
+    _callPollBusy = false;
   }
 
   void _startIncomingCallWatcher() {
-    if (_incomingCallWatchTimer != null || hasPushMessagingConfig) {
+    if (_incomingCallWatchTimer != null ||
+        _hasRegisteredPushTokenForCurrentUser) {
       return;
     }
 
@@ -537,8 +654,8 @@ class AppController extends ChangeNotifier {
         try {
           await _refreshActiveChatMessages(allowAutoSelect: false);
           notifyListeners();
-        } catch (_) {
-          // Keep polling active; a later tick can recover automatically.
+        } catch (error) {
+          await _recoverFromApiError(error);
         } finally {
           _chatPollBusy = false;
         }
@@ -562,7 +679,7 @@ class AppController extends ChangeNotifier {
   Future<void> _refreshIncomingCalls() async {
     if (_incomingCallWatchBusy ||
         stage != AppStage.home ||
-        hasPushMessagingConfig) {
+        _hasRegisteredPushTokenForCurrentUser) {
       return;
     }
     if (activeCall != null && !_isCallFinished(activeCall)) {
@@ -575,8 +692,8 @@ class AppController extends ChangeNotifier {
       _syncActiveCallFromHistory();
       await _maybeJoinAcceptedCall(activeCall);
       notifyListeners();
-    } catch (_) {
-      // Keep watcher running; next tick can recover automatically.
+    } catch (error) {
+      await _recoverFromApiError(error);
     } finally {
       _incomingCallWatchBusy = false;
     }
@@ -597,10 +714,52 @@ class AppController extends ChangeNotifier {
 
       try {
         await _syncAutomaticPushToken(currentUser);
-      } catch (_) {
-        // Ignore token sync hiccups; app reload or next token update can retry.
+        _syncActiveCallFromHistory();
+        notifyListeners();
+      } catch (error) {
+        if (!await _recoverFromApiError(error)) {
+          // Ignore token sync hiccups; app reload or next token update can retry.
+        }
       }
     });
+  }
+
+  void _scheduleHomeRealtimeSync() {
+    _homeRealtimeSyncQueued = true;
+    if (_homeRealtimeSyncBusy) {
+      return;
+    }
+    unawaited(_runHomeRealtimeSync());
+  }
+
+  Future<void> _runHomeRealtimeSync() async {
+    if (_homeRealtimeSyncBusy) {
+      return;
+    }
+
+    _homeRealtimeSyncBusy = true;
+    try {
+      while (_homeRealtimeSyncQueued) {
+        _homeRealtimeSyncQueued = false;
+        try {
+          await _syncRealtimeServices();
+          if (stage != AppStage.home) {
+            continue;
+          }
+          _syncActiveCallFromHistory();
+          await _consumeLaunchPushMessage();
+        } catch (error) {
+          if (!await _recoverFromApiError(error) && stage == AppStage.home) {
+            errorMessage = error.toString();
+          }
+        }
+      }
+    } finally {
+      _homeRealtimeSyncBusy = false;
+      if (stage == AppStage.home) {
+        notifyListeners();
+      }
+    }
   }
 
   Future<void> _consumeLaunchPushMessage() async {
@@ -652,8 +811,10 @@ class AppController extends ChangeNotifier {
       await _maybeJoinAcceptedCall(session);
       _syncActiveCallFromHistory();
       notifyListeners();
-    } catch (_) {
-      // Ignore malformed or outdated push payloads.
+    } catch (error) {
+      if (!await _recoverFromApiError(error)) {
+        // Ignore malformed or outdated push payloads.
+      }
     }
   }
 
@@ -805,7 +966,7 @@ class AppController extends ChangeNotifier {
     } else {
       _stopPollingCall();
       _callService.clearActiveCall();
-      if (stage == AppStage.home && !hasPushMessagingConfig) {
+      if (stage == AppStage.home && !_hasRegisteredPushTokenForCurrentUser) {
         _startIncomingCallWatcher();
       } else {
         _stopIncomingCallWatcher();
