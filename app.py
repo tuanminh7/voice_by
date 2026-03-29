@@ -145,6 +145,41 @@ def log_mobile_diag(event: str, *, level: str = "info", **fields) -> None:
     getattr(app.logger, level, app.logger.info)(message)
 
 
+def build_auth_diag_context() -> dict:
+    current_user = getattr(g, "current_user", None)
+    current_device = getattr(g, "current_device", None)
+    return {
+        "session_user_id": session.get("user_id"),
+        "session_device_id": session.get("device_id"),
+        "auth_user_id": current_user["id"] if current_user else None,
+        "auth_device_id": current_device["device_id"] if current_device else None,
+        "pin_token_present": bool((request.headers.get("X-PIN-Token", "") or "").strip()),
+    }
+
+
+def get_gemini_unavailable_reason(user_row: sqlite3.Row | None) -> str:
+    if genai is None:
+        return "sdk_missing"
+    if user_row is None:
+        return "missing_authenticated_user"
+    if not get_personal_gemini_api_key(user_row):
+        return "missing_personal_key"
+    return "unknown"
+
+
+def build_gemini_diag_context(user_row: sqlite3.Row | None) -> dict:
+    personal_key = get_personal_gemini_api_key(user_row)
+    return {
+        **build_auth_diag_context(),
+        "gemini_sdk_available": genai is not None,
+        "env_gemini_key_present": bool(API_KEY),
+        "has_personal_gemini_key": bool(personal_key),
+        "personal_gemini_key_preview": mask_secret(personal_key),
+        "user_row_present": user_row is not None,
+        "user_updated_at": user_row["updated_at"] if user_row else None,
+    }
+
+
 @app.before_request
 def log_native_client_request() -> None:
     client_source = (request.headers.get("X-Client-Source", "") or "").strip()
@@ -713,10 +748,16 @@ def reset_password():
 @app.route("/api/me", methods=["GET"])
 @pin_required
 def me():
+    family_payload = build_family_payload(g.current_user["id"])
+    log_mobile_diag(
+        "me_profile_state",
+        family_group_id=family_payload["family_group_id"] if family_payload else None,
+        **build_gemini_diag_context(g.current_user),
+    )
     return jsonify(
         {
             "user": serialize_user(g.current_user),
-            "family": build_family_payload(g.current_user["id"]),
+            "family": family_payload,
             "invitations": list_pending_family_invitations(g.current_user["id"]),
             "call_relationships": list_call_relationships(g.current_user["id"]),
             "supported_relationships": build_supported_relationships_payload(),
@@ -800,7 +841,7 @@ def update_gemini_key():
     api_key = (payload.get("api_key") or "").strip()
 
     if not api_key:
-        return json_error("Bạn cần nhập Gemini API key trước khi lưu.", 400, "missing_gemini_api_key")
+        return json_error("Ban can nhap Gemini API key truoc khi luu.", 400, "missing_gemini_api_key")
 
     get_db().execute(
         "UPDATE users SET gemini_api_key = ?, updated_at = ? WHERE id = ?",
@@ -808,7 +849,12 @@ def update_gemini_key():
     )
     get_db().commit()
     g.current_user = fetch_user_by_id(g.current_user["id"])
-    return jsonify({"message": "Đã lưu Gemini API key cá nhân.", "user": serialize_user(g.current_user)})
+    log_mobile_diag(
+        "gemini_key_saved",
+        submitted_key_length=len(api_key),
+        **build_gemini_diag_context(g.current_user),
+    )
+    return jsonify({"message": "Da luu Gemini API key ca nhan.", "user": serialize_user(g.current_user)})
 
 
 @app.route("/api/me/gemini-key", methods=["DELETE"])
@@ -820,7 +866,8 @@ def clear_gemini_key():
     )
     get_db().commit()
     g.current_user = fetch_user_by_id(g.current_user["id"])
-    return jsonify({"message": "Đã xóa Gemini API key cá nhân.", "user": serialize_user(g.current_user)})
+    log_mobile_diag("gemini_key_cleared", **build_gemini_diag_context(g.current_user))
+    return jsonify({"message": "Da xoa Gemini API key ca nhan.", "user": serialize_user(g.current_user)})
 
 
 @app.route("/api/families/current", methods=["GET"])
@@ -1458,6 +1505,15 @@ def create_call_from_voice_intent():
     pending_intent = get_pending_voice_call_intent()
     family_chat_intent = detect_family_chat_intent(transcript_text, g.current_user["id"])
     intent = detect_call_intent(transcript_text, relationship_rows)
+    log_mobile_diag(
+        "voice_intent_received",
+        transcript_preview=transcript_text[:120],
+        realtime_call_ready=realtime_call_ready,
+        pending_intent_present=bool(pending_intent),
+        call_intent_type=intent.get("type"),
+        family_chat_intent_type=family_chat_intent.get("type"),
+        **build_gemini_diag_context(g.current_user),
+    )
 
     if pending_intent and (intent.get("type") == "call" or family_chat_intent.get("type") == "family_chat"):
         clear_pending_voice_call_intent()
@@ -1912,6 +1968,12 @@ def get_user_model(user_row: sqlite3.Row | None):
 
 
 def build_unavailable_message(user_row: sqlite3.Row | None = None) -> str:
+    log_mobile_diag(
+        "gemini_unavailable",
+        level="warning",
+        reason=get_gemini_unavailable_reason(user_row),
+        **build_gemini_diag_context(user_row),
+    )
     if genai is None:
         return (
             "Dạ, ứng dụng chưa cài thư viện google-generativeai nên tôi chưa thể kết nối Gemini. "
@@ -1935,6 +1997,14 @@ def build_unavailable_message(user_row: sqlite3.Row | None = None) -> str:
 def generate_reply(question: str, history: list[str]) -> str:
     current_model = get_user_model(g.current_user)
     if current_model is None:
+        log_mobile_diag(
+            "gemini_reply_fallback",
+            level="warning",
+            question_preview=question[:120],
+            history_size=len(history),
+            reason=get_gemini_unavailable_reason(g.current_user),
+            **build_gemini_diag_context(g.current_user),
+        )
         reply = build_unavailable_message(g.current_user)
         remember_turn(history, question, reply)
         return reply
@@ -3414,6 +3484,15 @@ def list_family_chat_messages(user_id: int, partner_user_id: int, *, limit: int 
 def create_family_chat_message(sender_user_id: int, recipient_user_id: int, message_text: str) -> dict | None:
     membership, partner_membership = validate_same_family_chat_membership(sender_user_id, recipient_user_id)
     if membership is None or partner_membership is None:
+        log_mobile_diag(
+            "family_chat_blocked",
+            level="warning",
+            sender_user_id=sender_user_id,
+            recipient_user_id=recipient_user_id,
+            sender_has_family=membership is not None,
+            sender_family_group_id=membership["family_group_id"] if membership else None,
+            recipient_in_same_family=partner_membership is not None,
+        )
         return None
 
     sender = fetch_user_by_id(sender_user_id)
