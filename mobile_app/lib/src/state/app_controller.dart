@@ -641,24 +641,11 @@ class AppController extends ChangeNotifier {
       return;
     }
 
+    unawaited(_pollChatUpdates(notifyAfterRefresh: true));
     _chatPollTimer = Timer.periodic(
       const Duration(seconds: AppConfig.chatPollIntervalSeconds),
       (_) async {
-        if (_chatPollBusy ||
-            stage != AppStage.home ||
-            activeChatPartnerUserId == null) {
-          return;
-        }
-
-        _chatPollBusy = true;
-        try {
-          await _refreshActiveChatMessages(allowAutoSelect: false);
-          notifyListeners();
-        } catch (error) {
-          await _recoverFromApiError(error);
-        } finally {
-          _chatPollBusy = false;
-        }
+        await _pollChatUpdates(notifyAfterRefresh: true);
       },
     );
   }
@@ -669,10 +656,38 @@ class AppController extends ChangeNotifier {
   }
 
   void _syncChatPolling() {
-    if (stage == AppStage.home && activeChatPartnerUserId != null) {
+    if (stage == AppStage.home && family != null) {
       _startChatPolling();
     } else {
       _stopChatPolling();
+    }
+  }
+
+  Future<void> _pollChatUpdates({
+    required bool notifyAfterRefresh,
+  }) async {
+    if (_chatPollBusy || stage != AppStage.home || family == null) {
+      return;
+    }
+
+    _chatPollBusy = true;
+    try {
+      await _refreshChatThreads();
+      if (activeChatPartnerUserId != null) {
+        await _refreshActiveChatMessages(
+          allowAutoSelect: false,
+          refreshThreadsAfterFetch: false,
+        );
+      } else {
+        _syncChatPolling();
+      }
+      if (notifyAfterRefresh) {
+        notifyListeners();
+      }
+    } catch (error) {
+      await _recoverFromApiError(error);
+    } finally {
+      _chatPollBusy = false;
     }
   }
 
@@ -875,6 +890,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> _refreshActiveChatMessages({
     required bool allowAutoSelect,
+    bool refreshThreadsAfterFetch = true,
   }) async {
     var partnerUserId = activeChatPartnerUserId;
     if (partnerUserId == null && allowAutoSelect && chatThreads.isNotEmpty) {
@@ -899,7 +915,9 @@ class AppController extends ChangeNotifier {
     }
 
     activeChatMessages = await _apiService.getFamilyChatMessages(partnerUserId);
-    chatThreads = await _apiService.getFamilyChatThreads();
+    if (refreshThreadsAfterFetch) {
+      chatThreads = await _apiService.getFamilyChatThreads();
+    }
     _syncChatPolling();
   }
 

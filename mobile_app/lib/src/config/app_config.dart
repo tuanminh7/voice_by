@@ -22,7 +22,7 @@ class AppConfig {
   );
   static const int chatPollIntervalSeconds = int.fromEnvironment(
     'CHAT_POLL_INTERVAL_SECONDS',
-    defaultValue: 3,
+    defaultValue: 2,
   );
   static const int connectTimeoutSeconds = int.fromEnvironment(
     'CONNECT_TIMEOUT_SECONDS',
