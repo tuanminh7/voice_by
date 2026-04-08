@@ -6,10 +6,14 @@ services:
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     healthCheckPath: /health
     envVars:
+      - key: GEMINI_API_KEYS
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL
         value: gemini-2.5-flash
+      - key: APP_TIMEZONE
+        value: Asia/Ho_Chi_Minh
       - key: FLASK_SECRET_KEY
         generateValue: true
       - key: CALL_PROVIDER

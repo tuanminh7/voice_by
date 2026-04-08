@@ -16,6 +16,8 @@ class _AuthScreenState extends State<AuthScreen> {
 
   static const List<({String key, String label})> _careRoleOptions = [
     (key: '', label: 'Chưa chọn'),
+    (key: 'father', label: 'Ba'),
+    (key: 'mother', label: 'Mẹ'),
     (key: 'grandfather', label: 'Ông'),
     (key: 'grandmother', label: 'Bà'),
     (key: 'son', label: 'Con trai'),

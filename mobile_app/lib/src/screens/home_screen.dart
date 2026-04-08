@@ -22,7 +22,6 @@ class _HomeScreenState extends State<HomeScreen> {
   final _chatComposer = TextEditingController();
   final _familyName = TextEditingController();
   final _inviteIdentifier = TextEditingController();
-  final _apiKey = TextEditingController();
   final _priorityOrder = TextEditingController(text: '1');
 
   HomeMenuSection _section = HomeMenuSection.voice;
@@ -39,7 +38,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _configureTts() async {
     await _tts.setLanguage('vi-VN');
-    await _tts.setSpeechRate(0.45);
+    await _tts.setSpeechRate(0.52);
     await _tts.setPitch(1.0);
     await _tts.awaitSpeakCompletion(true);
   }
@@ -51,7 +50,6 @@ class _HomeScreenState extends State<HomeScreen> {
     _chatComposer.dispose();
     _familyName.dispose();
     _inviteIdentifier.dispose();
-    _apiKey.dispose();
     _priorityOrder.dispose();
     super.dispose();
   }
@@ -351,15 +349,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 pushStatusMessage: controller.pushStatusMessage,
                 hasPushMessagingConfig: controller.hasPushMessagingConfig,
                 hasRealtimeCallConfig: controller.hasRealtimeCallConfig,
-                apiKeyController: _apiKey,
-                onSaveApiKey: () async {
-                  final value = _apiKey.text.trim();
-                  if (value.isNotEmpty) {
-                    await controller.saveGeminiApiKey(value);
-                    _apiKey.clear();
-                  }
-                },
-                onDeleteApiKey: controller.deleteGeminiApiKey,
                 onLogout: controller.logout,
               ),
           ],
@@ -1138,9 +1127,6 @@ class _SettingsView extends StatelessWidget {
     required this.pushStatusMessage,
     required this.hasPushMessagingConfig,
     required this.hasRealtimeCallConfig,
-    required this.apiKeyController,
-    required this.onSaveApiKey,
-    required this.onDeleteApiKey,
     required this.onLogout,
   });
 
@@ -1149,53 +1135,12 @@ class _SettingsView extends StatelessWidget {
   final String? pushStatusMessage;
   final bool hasPushMessagingConfig;
   final bool hasRealtimeCallConfig;
-  final TextEditingController apiKeyController;
-  final Future<void> Function() onSaveApiKey;
-  final Future<void> Function() onDeleteApiKey;
   final Future<void> Function() onLogout;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
-        _Panel(
-          title: 'Gemini API key',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                profile?.hasPersonalGeminiKey == true
-                    ? 'Đang dùng API key cá nhân: ${profile?.geminiKeyPreview}'
-                    : 'Bạn chưa thêm Gemini API key cá nhân.',
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: apiKeyController,
-                decoration: const InputDecoration(
-                  labelText: 'Nhập Gemini API key',
-                ),
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                children: [
-                  FilledButton(
-                    onPressed: busy ? null : () async => onSaveApiKey(),
-                    child: const Text('Lưu API key'),
-                  ),
-                  OutlinedButton(
-                    onPressed: busy || profile?.hasPersonalGeminiKey != true
-                        ? null
-                        : () async => onDeleteApiKey(),
-                    child: const Text('Xóa API key'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 20),
         _Panel(
           title: 'Thông báo',
           child: Column(

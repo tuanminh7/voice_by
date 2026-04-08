@@ -4,12 +4,17 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import unicodedata
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from flask import Flask, Response, g, jsonify, render_template, request, session, stream_with_context, url_for
@@ -52,6 +57,7 @@ ELDER_MIN_AGE = int(os.getenv("ELDER_MIN_AGE", "60"))
 EMOTION_ALERT_THRESHOLD = int(os.getenv("EMOTION_ALERT_THRESHOLD", "45"))
 EMOTION_CRITICAL_THRESHOLD = int(os.getenv("EMOTION_CRITICAL_THRESHOLD", "25"))
 EMOTION_ALERT_COOLDOWN_MINUTES = int(os.getenv("EMOTION_ALERT_COOLDOWN_MINUTES", "180"))
+APP_TIMEZONE = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Ho_Chi_Minh"))
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
@@ -62,10 +68,34 @@ app.json.ensure_ascii = False
 
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+API_KEYS_RAW = (os.getenv("GEMINI_API_KEYS", "") or "").strip()
+GEMINI_API_KEY_POOL = tuple(
+    dict.fromkeys(
+        key.strip()
+        for key in [*re.split(r"[\n,;]+", API_KEYS_RAW), API_KEY]
+        if (key or "").strip()
+    )
+)
+GEMINI_GENERATION_CONFIG = {
+    "temperature": 0.35,
+    "candidate_count": 1,
+    "max_output_tokens": 384,
+}
+GEMINI_KEY_CURSOR = 0
+GEMINI_KEY_CURSOR_LOCK = threading.Lock()
+LIVE_WEATHER_CACHE_TTL_SECONDS = int(os.getenv("LIVE_WEATHER_CACHE_TTL_SECONDS", "300"))
+LIVE_WEATHER_CACHE: dict[str, dict] = {}
+WEATHER_LOCATIONS = {
+    "hanoi": {
+        "label": "Ha Noi",
+        "latitude": 21.0285,
+        "longitude": 105.8542,
+    },
+}
 
 model = None
-if genai and API_KEY:
-    genai.configure(api_key=API_KEY)
+if genai and GEMINI_API_KEY_POOL:
+    genai.configure(api_key=GEMINI_API_KEY_POOL[0])
     model = genai.GenerativeModel(MODEL_NAME)
 
 knowledge = KNOWLEDGE_PATH.read_text(encoding="utf-8") if KNOWLEDGE_PATH.exists() else ""
@@ -78,6 +108,10 @@ firebase_push_init_attempted = False
 
 def utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def now_in_app_timezone() -> datetime:
+    return datetime.now(APP_TIMEZONE)
 
 
 def utcnow_iso() -> str:
@@ -157,13 +191,56 @@ def build_auth_diag_context() -> dict:
     }
 
 
+def has_server_gemini_key_pool() -> bool:
+    return bool(GEMINI_API_KEY_POOL)
+
+
+def get_rotating_gemini_api_keys() -> list[str]:
+    if not GEMINI_API_KEY_POOL:
+        return []
+
+    global GEMINI_KEY_CURSOR
+    with GEMINI_KEY_CURSOR_LOCK:
+        start_index = GEMINI_KEY_CURSOR % len(GEMINI_API_KEY_POOL)
+        GEMINI_KEY_CURSOR = (GEMINI_KEY_CURSOR + 1) % len(GEMINI_API_KEY_POOL)
+
+    return list(GEMINI_API_KEY_POOL[start_index:]) + list(GEMINI_API_KEY_POOL[:start_index])
+
+
+def build_gemini_model(api_key: str):
+    if genai is None or not api_key:
+        return None
+
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(
+        MODEL_NAME,
+        generation_config=GEMINI_GENERATION_CONFIG,
+    )
+
+
+def is_retryable_gemini_error(error: Exception) -> bool:
+    text = simplify_text(str(error))
+    retryable_patterns = (
+        "429",
+        "rate limit",
+        "quota",
+        "resource exhausted",
+        "deadline exceeded",
+        "temporarily unavailable",
+        "service unavailable",
+        "internal",
+        "timeout",
+    )
+    return any(pattern in text for pattern in retryable_patterns)
+
+
 def get_gemini_unavailable_reason(user_row: sqlite3.Row | None) -> str:
     if genai is None:
         return "sdk_missing"
     if user_row is None:
         return "missing_authenticated_user"
-    if not get_personal_gemini_api_key(user_row):
-        return "missing_personal_key"
+    if not has_server_gemini_key_pool():
+        return "missing_server_key_pool"
     return "unknown"
 
 
@@ -173,6 +250,7 @@ def build_gemini_diag_context(user_row: sqlite3.Row | None) -> dict:
         **build_auth_diag_context(),
         "gemini_sdk_available": genai is not None,
         "env_gemini_key_present": bool(API_KEY),
+        "gemini_key_pool_size": len(GEMINI_API_KEY_POOL),
         "has_personal_gemini_key": bool(personal_key),
         "personal_gemini_key_preview": mask_secret(personal_key),
         "user_row_present": user_row is not None,
@@ -1483,7 +1561,7 @@ def describe_call_target(
 
 def build_voice_confirmation_message(user_row: sqlite3.Row, target_label: str) -> str:
     user_title = get_user_voice_title(user_row)
-    return f"{user_title} muốn gọi {target_label}. Nếu đúng, {user_title.lower()} hãy nói 'xác nhận'."
+    return f"{user_title} muon goi {target_label}. Neu dung, {get_user_voice_reference(user_row)} hay noi 'xac nhan'."
 
 
 @app.route("/api/calls/voice-intent", methods=["POST"])
@@ -1524,7 +1602,8 @@ def create_call_from_voice_intent():
             return jsonify(
                 {
                     "action": "chat",
-                    "message": family_chat_intent.get("question") or "Bác nói lại giúp con người nhận nhé.",
+                    "message": family_chat_intent.get("question")
+                    or f"{get_user_voice_title(g.current_user)} noi lai giup minh nguoi nhan nhe.",
                 }
             )
 
@@ -1537,7 +1616,8 @@ def create_call_from_voice_intent():
             return json_error("Không thể nhắn tin cho người này trong gia đình.", 404, "chat_partner_not_found")
 
         ack_message = (
-            f"Con đã nhắn giúp bác cho {family_chat_intent['target_label']} rồi nhé: "
+            f"{get_assistant_self_reference(g.current_user).capitalize()} da nhan giup "
+            f"{get_user_voice_reference(g.current_user)} cho {family_chat_intent['target_label']} roi nhe: "
             f"\"{family_chat_intent['message_text']}\""
         )
         remember_turn(get_history(), transcript_text, ack_message)
@@ -1586,7 +1666,10 @@ def create_call_from_voice_intent():
         return jsonify(
             {
                 "action": "chat",
-                "message": "Đã hủy yêu cầu gọi. Mình tiếp tục trò chuyện với bác nhé.",
+                "message": (
+                    f"Da huy yeu cau goi. Minh tiep tuc tro chuyen voi "
+                    f"{get_user_voice_reference(g.current_user)} nhe."
+                ),
             }
         )
 
@@ -1622,7 +1705,7 @@ def create_call_from_voice_intent():
 
     if intent.get("needs_confirmation") or not intent.get("relationship_key"):
         clear_pending_voice_call_intent()
-        question = intent.get("question") or "Bác muốn gọi ai ạ?"
+        question = intent.get("question") or f"{get_user_voice_title(g.current_user)} muon goi ai a?"
         return jsonify(
             {
                 "action": "confirm",
@@ -1844,6 +1927,12 @@ def chat_stream():
 
     @stream_with_context
     def generate():
+        realtime_reply = build_realtime_reply(user_text, g.current_user)
+        if realtime_reply is not None:
+            remember_turn(history, user_text, realtime_reply)
+            yield realtime_reply
+            return
+
         current_model = get_user_model(g.current_user)
         if current_model is None:
             reply = build_unavailable_message(g.current_user)
@@ -1906,13 +1995,175 @@ def search_context(question: str) -> str:
     return "\n".join(top_chunks)
 
 
+def format_vietnamese_weekday(value: datetime) -> str:
+    return {
+        0: "Thu hai",
+        1: "Thu ba",
+        2: "Thu tu",
+        3: "Thu nam",
+        4: "Thu sau",
+        5: "Thu bay",
+        6: "Chu nhat",
+    }[value.weekday()]
+
+
+def format_live_datetime(value: datetime) -> str:
+    return (
+        f"{value.strftime('%H:%M')} ngay {value.strftime('%d/%m/%Y')} "
+        f"({format_vietnamese_weekday(value)})"
+    )
+
+
+def is_current_time_question(text: str) -> bool:
+    simplified = simplify_text(text)
+    patterns = (
+        "may gio",
+        "bao nhieu gio",
+        "gio hien tai",
+        "bay gio la may gio",
+        "hom nay may gio",
+    )
+    return any(pattern in simplified for pattern in patterns)
+
+
+def is_current_date_question(text: str) -> bool:
+    simplified = simplify_text(text)
+    patterns = (
+        "hom nay la ngay may",
+        "hom nay thu may",
+        "ngay hom nay",
+        "ngay may",
+        "thu may",
+    )
+    return any(pattern in simplified for pattern in patterns)
+
+
+def extract_weather_location_key(text: str) -> str | None:
+    simplified = simplify_text(text)
+    weather_patterns = ("thoi tiet", "nhiet do", "bao nhieu do", "do c", "do celsius")
+    if not any(pattern in simplified for pattern in weather_patterns):
+        return None
+    if "ha noi" in simplified:
+        return "hanoi"
+    return None
+
+
+def get_live_weather_snapshot(location_key: str) -> dict | None:
+    location = WEATHER_LOCATIONS.get(location_key)
+    if not location:
+        return None
+
+    now_ts = now_in_app_timezone().timestamp()
+    cached = LIVE_WEATHER_CACHE.get(location_key)
+    if cached and now_ts - cached.get("fetched_at", 0) < LIVE_WEATHER_CACHE_TTL_SECONDS:
+        return cached["payload"]
+
+    query = urllib_parse.urlencode(
+        {
+            "latitude": location["latitude"],
+            "longitude": location["longitude"],
+            "current": "temperature_2m,apparent_temperature,relative_humidity_2m",
+            "timezone": "Asia/Ho_Chi_Minh",
+            "forecast_days": 1,
+        }
+    )
+    url = f"https://api.open-meteo.com/v1/forecast?{query}"
+
+    try:
+        with urllib_request.urlopen(url, timeout=2.5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (TimeoutError, urllib_error.URLError, urllib_error.HTTPError, json.JSONDecodeError):
+        return None
+
+    current = payload.get("current") or {}
+    temperature = current.get("temperature_2m")
+    apparent_temperature = current.get("apparent_temperature")
+    humidity = current.get("relative_humidity_2m")
+    observed_at = current.get("time")
+    if temperature is None:
+        return None
+
+    weather_payload = {
+        "label": location["label"],
+        "temperature_c": float(temperature),
+        "apparent_temperature_c": float(apparent_temperature) if apparent_temperature is not None else None,
+        "humidity_percent": int(humidity) if humidity is not None else None,
+        "observed_at": observed_at or "",
+    }
+    LIVE_WEATHER_CACHE[location_key] = {
+        "fetched_at": now_ts,
+        "payload": weather_payload,
+    }
+    return weather_payload
+
+
+def build_live_context(question: str) -> str:
+    now_value = now_in_app_timezone()
+    lines = [
+        f"- Thoi gian hien tai tai Viet Nam: {format_live_datetime(now_value)}.",
+    ]
+
+    weather_location_key = extract_weather_location_key(question)
+    if weather_location_key:
+        weather = get_live_weather_snapshot(weather_location_key)
+        if weather:
+            weather_line = (
+                f"- Thoi tiet truc tiep tai {weather['label']}: "
+                f"{weather['temperature_c']:.1f} do C"
+            )
+            if weather.get("apparent_temperature_c") is not None:
+                weather_line += f", cam nhan {weather['apparent_temperature_c']:.1f} do C"
+            if weather.get("humidity_percent") is not None:
+                weather_line += f", do am {weather['humidity_percent']}%"
+            if weather.get("observed_at"):
+                weather_line += f", cap nhat luc {weather['observed_at']}"
+            weather_line += "."
+            lines.append(weather_line)
+        else:
+            lines.append("- Chua lay duoc du lieu thoi tiet truc tiep luc nay.")
+
+    return "\n".join(lines)
+
+
+def build_realtime_reply(question: str, user_row: sqlite3.Row | None) -> str | None:
+    user_title = get_user_voice_title(user_row)
+    user_reference = user_title.lower()
+    now_value = now_in_app_timezone()
+
+    if is_current_time_question(question) or is_current_date_question(question):
+        return (
+            f"Da {user_reference}, bay gio la {now_value.strftime('%H:%M')}, "
+            f"{format_vietnamese_weekday(now_value)}, ngay {now_value.strftime('%d/%m/%Y')}."
+        )
+
+    weather_location_key = extract_weather_location_key(question)
+    if weather_location_key:
+        weather = get_live_weather_snapshot(weather_location_key)
+        if weather:
+            reply = (
+                f"Da {user_reference}, luc nay o {weather['label']} dang khoang "
+                f"{weather['temperature_c']:.1f} do C"
+            )
+            if weather.get("apparent_temperature_c") is not None:
+                reply += f", cam nhan {weather['apparent_temperature_c']:.1f} do C"
+            if weather.get("humidity_percent") is not None:
+                reply += f", do am {weather['humidity_percent']}%"
+            reply += "."
+            return reply
+        return f"Da {user_reference}, hien minh chua lay duoc thoi tiet truc tiep luc nay."
+
+    return None
+
+
 def build_prompt(question: str, history: list[str]) -> str:
     user_title = get_user_voice_title(g.current_user)
+    assistant_self = get_assistant_self_reference(g.current_user)
     history_text = "\n".join(history[-6:]) or "Chưa có lịch sử hội thoại."
     context = search_context(question) or knowledge or "Không có dữ liệu tham khảo bổ sung."
+    live_context = build_live_context(question)
 
     return f"""
-Bạn là một trợ lý thân thiện, ấm áp và kiên nhẫn dành cho người lớn tuổi.
+Bạn là một trợ lý thân thiện, ấm áp và kiên nhẫn cho gia đình.
 
 Nguyên tắc trả lời:
 - Dùng tiếng Việt tự nhiên, đầy đủ dấu, dễ hiểu, câu ngắn gọn.
@@ -1920,6 +2171,13 @@ Nguyên tắc trả lời:
 - Nếu câu hỏi chưa rõ, hỏi lại ngắn gọn.
 - Không tự ý đưa ra thông tin y tế nguy hiểm như một chẩn đoán chính xác.
 - Ưu tiên dùng thông tin trong phần tham khảo khi có liên quan.
+- Xưng hô với người dùng là "{user_title.lower()}". Nếu cần tự xưng, hãy dùng "{assistant_self}".
+- Tuyệt đối không gọi người dùng là "bà", "bác" hoặc "cháu" nếu vai trò đang lưu không phải như vậy.
+- Nếu người dùng hỏi thông tin thay đổi theo thời gian như giờ hiện tại, ngày hiện tại, thời tiết hoặc nhiệt độ, hãy ưu tiên dùng Live context.
+- Khi cần trả lời chi tiết, hãy chia ý rõ ràng và đi thẳng vào câu hỏi.
+
+Live context:
+{live_context}
 
 Lịch sử hội thoại:
 {history_text}
@@ -1956,15 +2214,15 @@ def get_history() -> list[str]:
 
 
 def get_user_model(user_row: sqlite3.Row | None):
+    del user_row
     if genai is None:
         return None
 
-    personal_key = get_personal_gemini_api_key(user_row)
-    if not personal_key:
+    api_keys = get_rotating_gemini_api_keys()
+    if not api_keys:
         return None
 
-    genai.configure(api_key=personal_key)
-    return genai.GenerativeModel(MODEL_NAME)
+    return build_gemini_model(api_keys[0])
 
 
 def build_unavailable_message(user_row: sqlite3.Row | None = None) -> str:
@@ -1980,23 +2238,22 @@ def build_unavailable_message(user_row: sqlite3.Row | None = None) -> str:
             "Bạn hãy cài dependencies rồi thử lại nhé."
         )
 
-    if user_row is not None and not get_personal_gemini_api_key(user_row):
+    if not has_server_gemini_key_pool():
         return (
-            "Dạ, để trò chuyện hoặc voice với trợ lý, bác hãy mở phần Cài đặt và thêm Gemini API key cá nhân trước nhé."
-        )
-
-    if not API_KEY:
-        return (
-            "Dạ, hiện chưa có GEMINI_API_KEY trong môi trường nên tôi chưa thể trả lời bằng Gemini. "
-            "Bạn chỉ cần thêm API key vào file .env hoặc biến môi trường là được."
+            "Da, he thong chua duoc cau hinh Gemini API key tren server nen toi chua the tra loi AI."
         )
 
     return "Dạ, hiện tôi chưa sẵn sàng để phản hồi. Bạn thử lại giúp tôi nhé."
 
 
 def generate_reply(question: str, history: list[str]) -> str:
-    current_model = get_user_model(g.current_user)
-    if current_model is None:
+    realtime_reply = build_realtime_reply(question, g.current_user)
+    if realtime_reply is not None:
+        remember_turn(history, question, realtime_reply)
+        return realtime_reply
+
+    api_keys = get_rotating_gemini_api_keys()
+    if not api_keys:
         log_mobile_diag(
             "gemini_reply_fallback",
             level="warning",
@@ -2010,26 +2267,37 @@ def generate_reply(question: str, history: list[str]) -> str:
         return reply
 
     prompt = build_prompt(question, history)
-    try:
-        response = current_model.generate_content(prompt)
-        reply = (getattr(response, "text", "") or "").strip()
-    except Exception as error:
-        log_mobile_diag(
-            "gemini_reply_failed",
-            level="error",
-            question_preview=question[:120],
-            history_size=len(history),
-            error=str(error),
-            **build_gemini_diag_context(g.current_user),
-        )
-        reply = (
-            "Da, trong luc ket noi tro ly da co loi xay ra. "
-            "Ban thu lai sau it phut hoac kiem tra Gemini API key giup toi nhe."
-        )
-        remember_turn(history, question, reply)
-        return reply
+    last_error: Exception | None = None
+    for api_key in api_keys:
+        current_model = build_gemini_model(api_key)
+        if current_model is None:
+            continue
+        try:
+            response = current_model.generate_content(prompt)
+            reply = (getattr(response, "text", "") or "").strip()
+            if reply:
+                remember_turn(history, question, reply)
+                return reply
+        except Exception as error:
+            last_error = error
+            if not is_retryable_gemini_error(error):
+                break
+            continue
 
-    if not reply:
+    log_mobile_diag(
+        "gemini_reply_failed",
+        level="error",
+        question_preview=question[:120],
+        history_size=len(history),
+        error=str(last_error) if last_error is not None else "empty_reply",
+        attempted_key_count=len(api_keys),
+        **build_gemini_diag_context(g.current_user),
+    )
+    reply = (
+        "Da, trong luc ket noi tro ly da co loi xay ra. "
+        "Ban thu lai sau it phut giup minh nhe."
+    )
+    if last_error is None:
         reply = "Dạ, tôi chưa tạo được câu trả lời phù hợp. Bạn thử hỏi lại một chút nhé."
 
     remember_turn(history, question, reply)
@@ -2506,6 +2774,8 @@ EMOTION_POSITIVE_KEYWORDS = {
 
 
 RELATIONSHIP_LABELS = {
+    "father": "ba",
+    "mother": "me",
     "son": "con trai",
     "daughter": "con gái",
     "grandchild": "cháu",
@@ -2519,7 +2789,25 @@ RELATIONSHIP_LABELS = {
     "family_member": "người nhà",
 }
 
+RELATIONSHIP_EXACT_ALIASES = {
+    "ba": "father",
+    "bo": "father",
+    "bố": "father",
+    "cha": "father",
+    "me": "mother",
+    "mẹ": "mother",
+    "má": "mother",
+    "bà": "grandmother",
+    "bà nội": "grandmother",
+    "bà ngoại": "grandmother",
+}
+
 RELATIONSHIP_ALIASES = {
+    "ba": "father",
+    "bo": "father",
+    "cha": "father",
+    "me": "mother",
+    "ma": "mother",
     "con trai": "son",
     "trai": "son",
     "thang con trai": "son",
@@ -2532,7 +2820,6 @@ RELATIONSHIP_ALIASES = {
     "ong": "grandfather",
     "ong noi": "grandfather",
     "ong ngoai": "grandfather",
-    "ba": "grandmother",
     "ba noi": "grandmother",
     "ba ngoai": "grandmother",
     "vo": "wife",
@@ -2572,6 +2859,10 @@ def simplify_text(value: str) -> str:
 
 
 def normalize_relationship_key(value: str) -> str:
+    lowered = (value or "").strip().lower()
+    if lowered in RELATIONSHIP_EXACT_ALIASES:
+        return RELATIONSHIP_EXACT_ALIASES[lowered]
+
     simplified = simplify_text(value)
     return RELATIONSHIP_ALIASES.get(simplified, simplified)
 
@@ -2887,10 +3178,11 @@ def describe_voice_message_target(candidate: dict) -> str:
 
 def resolve_voice_message_target(owner_user_id: int, target_hint: str) -> dict:
     candidates = list_voice_message_target_candidates(owner_user_id)
+    current_user = getattr(g, "current_user", None)
     if not candidates:
         return {
             "status": "no_family_targets",
-            "question": "Gia đình của bác chưa có người thân nào để nhắn tin.",
+            "question": f"Gia dinh cua {get_user_voice_reference(current_user)} chua co nguoi than nao de nhan tin.",
         }
 
     name_matches: list[dict] = []
@@ -2924,8 +3216,8 @@ def resolve_voice_message_target(owner_user_id: int, target_hint: str) -> dict:
         return {
             "status": "ambiguous",
             "question": (
-                f"Bác muốn nhắn cho {', '.join(names)} ạ? "
-                "Bác nói lại đầy đủ giúp con nhé."
+                f"{get_user_voice_title(current_user)} muon nhan cho {', '.join(names)} a? "
+                f"{get_user_voice_title(current_user)} noi lai day du giup {get_assistant_self_reference(current_user)} nhe."
             ),
         }
 
@@ -2942,8 +3234,8 @@ def resolve_voice_message_target(owner_user_id: int, target_hint: str) -> dict:
         return {
             "status": "ambiguous",
             "question": (
-                f"Con thấy có nhiều người phù hợp: {', '.join(names)}. "
-                "Bác nói lại rõ hơn giúp con nhé."
+                f"{get_assistant_self_reference(current_user).capitalize()} thay co nhieu nguoi phu hop: {', '.join(names)}. "
+                f"{get_user_voice_title(current_user)} noi lai ro hon giup {get_assistant_self_reference(current_user)} nhe."
             ),
         }
 
@@ -2952,14 +3244,17 @@ def resolve_voice_message_target(owner_user_id: int, target_hint: str) -> dict:
         return {
             "status": "not_found",
             "question": (
-                f"Con chưa xác định đúng người nhận. "
-                f"Bác có thể nói theo mẫu: nhắn cho {sample_names[0]} là ..."
+                f"{get_assistant_self_reference(current_user).capitalize()} chua xac dinh dung nguoi nhan. "
+                f"{get_user_voice_title(current_user)} co the noi theo mau: nhan cho {sample_names[0]} la ..."
             ),
         }
 
     return {
         "status": "not_found",
-        "question": "Con chưa xác định đúng người nhận. Bác nói lại giúp con nhé.",
+        "question": (
+            f"{get_assistant_self_reference(current_user).capitalize()} chua xac dinh dung nguoi nhan. "
+            f"{get_user_voice_title(current_user)} noi lai giup {get_assistant_self_reference(current_user)} nhe."
+        ),
     }
 
 
@@ -3007,11 +3302,13 @@ def get_user_care_role_key(user_row: sqlite3.Row | None) -> str | None:
             WHERE family_group_id = ?
               AND relative_user_id = ?
               AND is_active = 1
-              AND relationship_key IN ('grandfather', 'grandmother')
+              AND relationship_key IN ('mother', 'father', 'grandmother', 'grandfather')
             ORDER BY CASE relationship_key
-                WHEN 'grandmother' THEN 0
-                WHEN 'grandfather' THEN 1
-                ELSE 2
+                WHEN 'mother' THEN 0
+                WHEN 'father' THEN 1
+                WHEN 'grandmother' THEN 2
+                WHEN 'grandfather' THEN 3
+                ELSE 4
             END ASC, priority_order ASC, id ASC
             LIMIT 1
             """,
@@ -3029,10 +3326,36 @@ def get_user_care_role_key(user_row: sqlite3.Row | None) -> str | None:
 def get_user_voice_title(user_row: sqlite3.Row | None) -> str:
     role_key = get_user_care_role_key(user_row)
     return {
+        "father": "Ba",
+        "mother": "Me",
+        "son": "Con",
+        "daughter": "Con",
+        "grandchild": "Chau",
         "grandfather": "Ông",
         "grandmother": "Bà",
+        "wife": "Minh",
+        "husband": "Minh",
+        "brother": "Anh",
+        "sister": "Chi",
+        "caregiver": "Anh chi",
+        "family_member": "Minh",
         "elder": "Bác",
     }.get(role_key, "Bạn")
+
+
+def get_assistant_self_reference(user_row: sqlite3.Row | None) -> str:
+    role_key = get_user_care_role_key(user_row)
+    return {
+        "father": "con",
+        "mother": "con",
+        "grandfather": "chau",
+        "grandmother": "chau",
+        "elder": "chau",
+    }.get(role_key, "minh")
+
+
+def get_user_voice_reference(user_row: sqlite3.Row | None) -> str:
+    return get_user_voice_title(user_row).lower()
 
 
 def analyze_emotion_signal(message_text: str) -> dict:
@@ -3141,9 +3464,11 @@ def is_monitored_elder(user_id: int, family_group_id: int) -> bool:
 
 def emotion_role_label(care_role_key: str) -> str:
     return {
-        "ong": "Ông",
-        "ba": "Bà",
-        "nguoi_cao_tuoi": "Người cao tuổi",
+        "grandfather": "Ong",
+        "grandmother": "Ba",
+        "father": "Ba",
+        "mother": "Me",
+        "elder": "Nguoi cao tuoi",
     }.get(care_role_key, "Người được theo dõi")
 
 
@@ -4246,7 +4571,7 @@ def detect_call_intent(text: str, relationship_rows: list[sqlite3.Row]) -> dict:
             "relationship_key": None,
             "confidence": 0.45,
             "needs_confirmation": True,
-            "question": f"Bác muốn gọi {', '.join(names)} ạ?",
+            "question": f"{get_user_voice_title(g.current_user)} muon goi {', '.join(names)} a?",
         }
 
     alias_map = build_relationship_call_aliases(relationship_rows)
@@ -4275,7 +4600,7 @@ def detect_call_intent(text: str, relationship_rows: list[sqlite3.Row]) -> dict:
             "relationship_key": None,
             "confidence": 0.4,
             "needs_confirmation": True,
-            "question": f"Bác muốn gọi {', '.join(labels)} ạ?",
+            "question": f"{get_user_voice_title(g.current_user)} muon goi {', '.join(labels)} a?",
         }
 
     if len(available_relationship_keys) == 1 and is_generic_call_request:
@@ -4295,7 +4620,7 @@ def detect_call_intent(text: str, relationship_rows: list[sqlite3.Row]) -> dict:
             "confidence": 0.35,
             "needs_confirmation": True,
             "question": (
-                f"Toi chua khop dung nguoi ban muon goi. "
+                f"Minh chua khop dung nguoi {get_user_voice_reference(g.current_user)} muon goi. "
                 f"Hien gia dinh dang cau hinh: {', '.join(labels)}."
             ),
         }
