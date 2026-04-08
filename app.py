@@ -2010,8 +2010,24 @@ def generate_reply(question: str, history: list[str]) -> str:
         return reply
 
     prompt = build_prompt(question, history)
-    response = current_model.generate_content(prompt)
-    reply = (getattr(response, "text", "") or "").strip()
+    try:
+        response = current_model.generate_content(prompt)
+        reply = (getattr(response, "text", "") or "").strip()
+    except Exception as error:
+        log_mobile_diag(
+            "gemini_reply_failed",
+            level="error",
+            question_preview=question[:120],
+            history_size=len(history),
+            error=str(error),
+            **build_gemini_diag_context(g.current_user),
+        )
+        reply = (
+            "Da, trong luc ket noi tro ly da co loi xay ra. "
+            "Ban thu lai sau it phut hoac kiem tra Gemini API key giup toi nhe."
+        )
+        remember_turn(history, question, reply)
+        return reply
 
     if not reply:
         reply = "Dạ, tôi chưa tạo được câu trả lời phù hợp. Bạn thử hỏi lại một chút nhé."
