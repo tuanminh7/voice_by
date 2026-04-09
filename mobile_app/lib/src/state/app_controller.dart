@@ -442,7 +442,11 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> sendChatMessage(String messageText) async {
-    final partnerUserId = activeChatPartnerUserId;
+    var partnerUserId = activeChatPartnerUserId;
+    if (partnerUserId == null && chatThreads.isNotEmpty) {
+      partnerUserId = chatThreads.first.partnerUserId;
+      activeChatPartnerUserId = partnerUserId;
+    }
     if (partnerUserId == null) {
       return;
     }

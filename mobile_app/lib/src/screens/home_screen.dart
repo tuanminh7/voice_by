@@ -956,6 +956,9 @@ class _ChatView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final resolvedThread =
+        activeThread ?? (threads.isNotEmpty ? threads.first : null);
+
     return _Panel(
       title: 'Tin nhắn gia đình',
       child: threads.isEmpty
@@ -1052,15 +1055,15 @@ class _ChatView extends StatelessWidget {
                         minLines: 1,
                         maxLines: 3,
                         decoration: InputDecoration(
-                          labelText: activeThread == null
+                          labelText: resolvedThread == null
                               ? 'Chọn người thân để nhắn tin'
-                              : 'Nhắn cho ${activeThread!.partnerFullName}',
+                              : 'Nhắn cho ${resolvedThread.partnerFullName}',
                         ),
                       ),
                     ),
                     const SizedBox(width: 12),
                     FilledButton(
-                      onPressed: busy || activeThread == null
+                      onPressed: busy || resolvedThread == null
                           ? null
                           : () async => onSend(),
                       child: const Text('Gửi'),
