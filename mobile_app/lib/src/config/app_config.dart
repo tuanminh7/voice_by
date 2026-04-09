@@ -18,7 +18,7 @@ class AppConfig {
   );
   static const int incomingCallWatchIntervalSeconds = int.fromEnvironment(
     'INCOMING_CALL_WATCH_INTERVAL_SECONDS',
-    defaultValue: 30,
+    defaultValue: 5,
   );
   static const int chatPollIntervalSeconds = int.fromEnvironment(
     'CHAT_POLL_INTERVAL_SECONDS',

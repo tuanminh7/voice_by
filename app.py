@@ -17,7 +17,7 @@ from urllib import request as urllib_request
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from flask import Flask, Response, g, jsonify, render_template, request, session, stream_with_context, url_for
+from flask import Flask, Response, g, has_request_context, jsonify, render_template, request, session, stream_with_context, url_for
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -85,12 +85,25 @@ GEMINI_KEY_CURSOR = 0
 GEMINI_KEY_CURSOR_LOCK = threading.Lock()
 LIVE_WEATHER_CACHE_TTL_SECONDS = int(os.getenv("LIVE_WEATHER_CACHE_TTL_SECONDS", "300"))
 LIVE_WEATHER_CACHE: dict[str, dict] = {}
+WEATHER_GEOCODE_CACHE_TTL_SECONDS = int(os.getenv("WEATHER_GEOCODE_CACHE_TTL_SECONDS", "86400"))
+WEATHER_GEOCODE_CACHE: dict[str, dict] = {}
 WEATHER_LOCATIONS = {
-    "hanoi": {
+    "ha noi": {
         "label": "Ha Noi",
         "latitude": 21.0285,
         "longitude": 105.8542,
+        "timezone": "Asia/Ho_Chi_Minh",
     },
+}
+WEATHER_LOCATION_ALIASES = {
+    "hanoi": "ha noi",
+    "hn": "ha noi",
+    "ha noi": "ha noi",
+    "tphcm": "ho chi minh city",
+    "tp hcm": "ho chi minh city",
+    "hcm": "ho chi minh city",
+    "sai gon": "ho chi minh city",
+    "saigon": "ho chi minh city",
 }
 
 model = None
@@ -165,18 +178,37 @@ def _truncate_log_value(value, *, limit: int = 160):
 
 
 def log_mobile_diag(event: str, *, level: str = "info", **fields) -> None:
+    in_request = has_request_context()
     payload = {
         "event": event,
-        "path": request.path,
-        "method": request.method,
-        "user_id": g.current_user["id"] if getattr(g, "current_user", None) else None,
-        "device_id": g.current_device["device_id"] if getattr(g, "current_device", None) else None,
-        "client_source": (request.headers.get("X-Client-Source", "") or "").strip() or None,
-        "client_platform": (request.headers.get("X-Client-Platform", "") or "").strip() or None,
+        "path": request.path if in_request else None,
+        "method": request.method if in_request else None,
+        "user_id": g.current_user["id"] if in_request and getattr(g, "current_user", None) else None,
+        "device_id": g.current_device["device_id"] if in_request and getattr(g, "current_device", None) else None,
+        "client_source": ((request.headers.get("X-Client-Source", "") or "").strip() or None) if in_request else None,
+        "client_platform": ((request.headers.get("X-Client-Platform", "") or "").strip() or None) if in_request else None,
     }
     payload.update({key: _truncate_log_value(value) for key, value in fields.items() if value is not None})
     message = "MOBILE_DIAG " + json.dumps(payload, ensure_ascii=False, sort_keys=True)
     getattr(app.logger, level, app.logger.info)(message)
+
+
+def voice_json_response(action: str, message: str, **payload):
+    call_payload = payload.get("call") if isinstance(payload.get("call"), dict) else None
+    chat_message = payload.get("chat_message") if isinstance(payload.get("chat_message"), dict) else None
+    intent_payload = payload.get("intent") if isinstance(payload.get("intent"), dict) else None
+    log_mobile_diag(
+        "voice_intent_result",
+        action=action,
+        message_preview=message[:160],
+        question_preview=payload.get("question"),
+        intent_type=intent_payload.get("type") if intent_payload else None,
+        call_session_id=call_payload.get("call_session_id") if call_payload else None,
+        chat_message_id=chat_message.get("id") if chat_message else None,
+        emotion_logged=bool(payload.get("emotion_signal")),
+        payload_keys=sorted(payload.keys()),
+    )
+    return jsonify({"action": action, "message": message, **payload})
 
 
 def build_auth_diag_context() -> dict:
@@ -1599,12 +1631,10 @@ def create_call_from_voice_intent():
 
     if family_chat_intent.get("type") == "family_chat":
         if family_chat_intent.get("needs_confirmation"):
-            return jsonify(
-                {
-                    "action": "chat",
-                    "message": family_chat_intent.get("question")
-                    or f"{get_user_voice_title(g.current_user)} noi lai giup minh nguoi nhan nhe.",
-                }
+            return voice_json_response(
+                "chat",
+                family_chat_intent.get("question")
+                or f"{get_user_voice_title(g.current_user)} noi lai giup minh nguoi nhan nhe.",
             )
 
         message_payload = create_family_chat_message(
@@ -1621,16 +1651,20 @@ def create_call_from_voice_intent():
             f"\"{family_chat_intent['message_text']}\""
         )
         remember_turn(get_history(), transcript_text, ack_message)
-        return jsonify(
-            {
-                "action": "chat",
-                "message": ack_message,
-                "chat_message": message_payload,
-            }
+        return voice_json_response(
+            "chat",
+            ack_message,
+            chat_message=message_payload,
         )
 
     if not realtime_call_ready and intent.get("type") == "call":
         clear_pending_voice_call_intent()
+        log_mobile_diag(
+            "voice_intent_result",
+            action="chat",
+            outcome="realtime_not_ready",
+            transcript_preview=transcript_text[:120],
+        )
         return jsonify(
             {
                 "action": "chat",
@@ -1653,6 +1687,13 @@ def create_call_from_voice_intent():
         if not session_row:
             return json_error("Gia đình chưa cài đặt người nhận cho lệnh gọi này.", 404, "call_target_not_found")
 
+        log_mobile_diag(
+            "voice_intent_result",
+            action="calling",
+            outcome="call_created",
+            transcript_preview=transcript_text[:120],
+            call_session_id=session_row["id"],
+        )
         return jsonify(
             {
                 "action": "calling",
@@ -1663,6 +1704,12 @@ def create_call_from_voice_intent():
 
     if pending_intent and is_voice_cancel_reply(transcript_text):
         clear_pending_voice_call_intent()
+        log_mobile_diag(
+            "voice_intent_result",
+            action="chat",
+            outcome="call_cancelled",
+            transcript_preview=transcript_text[:120],
+        )
         return jsonify(
             {
                 "action": "chat",
@@ -1675,17 +1722,22 @@ def create_call_from_voice_intent():
 
     if intent.get("type") != "call":
         if pending_intent:
+            reminder_message = build_voice_confirmation_message(
+                g.current_user,
+                pending_intent["target_label"],
+            )
+            log_mobile_diag(
+                "voice_intent_result",
+                action="confirm",
+                outcome="pending_call_reminder",
+                transcript_preview=transcript_text[:120],
+                question_preview=reminder_message,
+            )
             return jsonify(
                 {
                     "action": "confirm",
-                    "message": build_voice_confirmation_message(
-                        g.current_user,
-                        pending_intent["target_label"],
-                    ),
-                    "question": build_voice_confirmation_message(
-                        g.current_user,
-                        pending_intent["target_label"],
-                    ),
+                    "message": reminder_message,
+                    "question": reminder_message,
                 }
             )
 
@@ -1694,6 +1746,14 @@ def create_call_from_voice_intent():
             g.current_user,
             transcript_text,
             source="assistant_voice",
+        )
+        log_mobile_diag(
+            "voice_intent_result",
+            action="chat",
+            outcome="assistant_reply",
+            transcript_preview=transcript_text[:120],
+            reply_preview=reply[:160],
+            emotion_logged=bool(emotion_signal),
         )
         return jsonify(
             {
@@ -1706,6 +1766,14 @@ def create_call_from_voice_intent():
     if intent.get("needs_confirmation") or not intent.get("relationship_key"):
         clear_pending_voice_call_intent()
         question = intent.get("question") or f"{get_user_voice_title(g.current_user)} muon goi ai a?"
+        log_mobile_diag(
+            "voice_intent_result",
+            action="confirm",
+            outcome="call_needs_confirmation",
+            transcript_preview=transcript_text[:120],
+            question_preview=question,
+            intent_type=intent.get("type"),
+        )
         return jsonify(
             {
                 "action": "confirm",
@@ -1729,6 +1797,15 @@ def create_call_from_voice_intent():
     confirmation_message = build_voice_confirmation_message(
         g.current_user,
         target_label,
+    )
+    log_mobile_diag(
+        "voice_intent_result",
+        action="confirm",
+        outcome="call_confirmation_ready",
+        transcript_preview=transcript_text[:120],
+        question_preview=confirmation_message,
+        relationship_key=intent.get("relationship_key"),
+        relative_user_id=intent.get("relative_user_id"),
     )
     return jsonify(
         {
@@ -2038,23 +2115,199 @@ def is_current_date_question(text: str) -> bool:
     return any(pattern in simplified for pattern in patterns)
 
 
-def extract_weather_location_key(text: str) -> str | None:
+def is_weather_question(text: str) -> bool:
     simplified = simplify_text(text)
-    weather_patterns = ("thoi tiet", "nhiet do", "bao nhieu do", "do c", "do celsius")
-    if not any(pattern in simplified for pattern in weather_patterns):
+    weather_patterns = (
+        "thoi tiet",
+        "du bao",
+        "nhiet do",
+        "bao nhieu do",
+        "do c",
+        "do celsius",
+        "mua hay nang",
+        "co mua khong",
+        "dang mua khong",
+        "co nang khong",
+    )
+    return any(pattern in simplified for pattern in weather_patterns)
+
+
+def normalize_weather_location_query(value: str) -> str:
+    simplified = simplify_text(value)
+    replacements = (
+        "du bao thoi tiet",
+        "thoi tiet hien tai",
+        "thoi tiet",
+        "nhiet do",
+        "bao nhieu do celsius",
+        "bao nhieu do c",
+        "bao nhieu do",
+        "do celsius",
+        "do c",
+        "dang mua hay nang",
+        "mua hay nang",
+        "co mua khong",
+        "dang mua khong",
+        "co nang khong",
+        "hien tai",
+        "luc nay",
+        "bay gio",
+        "hom nay",
+        "ngay mai",
+        "ra sao",
+        "the nao",
+        "cho toi biet",
+        "giup toi",
+        "xem giup",
+        "xem dum",
+        "xem ho",
+        "xem",
+        "voi",
+    )
+    cleaned = simplified
+    for phrase in replacements:
+        cleaned = re.sub(rf"\b{re.escape(phrase)}\b", " ", cleaned)
+
+    for prefix in ("o ", "tai "):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+
+    cleaned = re.sub(r"[^a-z0-9 ]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return WEATHER_LOCATION_ALIASES.get(cleaned, cleaned)
+
+
+def extract_weather_location_query(text: str) -> str | None:
+    simplified = simplify_text(text)
+    if not is_weather_question(simplified):
         return None
-    if "ha noi" in simplified:
-        return "hanoi"
-    return None
+
+    explicit_matches = list(re.finditer(r"\b(?:o|tai)\s+([a-z0-9 ]+)", simplified))
+    for match in reversed(explicit_matches):
+        candidate = normalize_weather_location_query(match.group(1))
+        if candidate:
+            return candidate
+
+    candidate = normalize_weather_location_query(simplified)
+    return candidate or None
 
 
-def get_live_weather_snapshot(location_key: str) -> dict | None:
-    location = WEATHER_LOCATIONS.get(location_key)
+def resolve_weather_location(location_query: str) -> dict | None:
+    normalized_query = normalize_weather_location_query(location_query)
+    if not normalized_query:
+        return None
+
+    static_location = WEATHER_LOCATIONS.get(normalized_query)
+    if static_location:
+        return static_location
+
+    now_ts = now_in_app_timezone().timestamp()
+    cached = WEATHER_GEOCODE_CACHE.get(normalized_query)
+    if cached and now_ts - cached.get("fetched_at", 0) < WEATHER_GEOCODE_CACHE_TTL_SECONDS:
+        return cached["payload"]
+
+    params = urllib_parse.urlencode(
+        {
+            "name": normalized_query,
+            "count": 1,
+            "language": "vi",
+            "format": "json",
+        }
+    )
+    url = f"https://geocoding-api.open-meteo.com/v1/search?{params}"
+    try:
+        with urllib_request.urlopen(url, timeout=2.5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (TimeoutError, urllib_error.URLError, urllib_error.HTTPError, json.JSONDecodeError) as error:
+        log_mobile_diag(
+            "weather_geocode_failed",
+            level="warning",
+            location_query=normalized_query,
+            error=str(error),
+        )
+        return None
+
+    rows = payload.get("results") or []
+    if not rows:
+        log_mobile_diag(
+            "weather_geocode_not_found",
+            level="warning",
+            location_query=normalized_query,
+        )
+        return None
+
+    row = rows[0]
+    parts = [row.get("name"), row.get("admin1"), row.get("country")]
+    label_parts = []
+    for part in parts:
+        if part and part not in label_parts:
+            label_parts.append(part)
+
+    location_payload = {
+        "label": ", ".join(label_parts) or normalized_query.title(),
+        "latitude": float(row["latitude"]),
+        "longitude": float(row["longitude"]),
+        "timezone": row.get("timezone") or "auto",
+    }
+    WEATHER_GEOCODE_CACHE[normalized_query] = {
+        "fetched_at": now_ts,
+        "payload": location_payload,
+    }
+    log_mobile_diag(
+        "weather_geocode_succeeded",
+        location_query=normalized_query,
+        weather_label=location_payload["label"],
+    )
+    return location_payload
+
+
+def describe_weather_condition(
+    weather_code: int | None,
+    *,
+    is_day: int | None = None,
+    precipitation: float | None = None,
+    rain: float | None = None,
+    showers: float | None = None,
+) -> str:
+    wet_amount = max(
+        float(precipitation or 0),
+        float(rain or 0),
+        float(showers or 0),
+    )
+    if wet_amount >= 0.1:
+        return "dang mua"
+    if weather_code is None:
+        return "thoi tiet kha on dinh"
+
+    if weather_code == 0:
+        return "dang nang" if is_day else "troi quang"
+    if weather_code in {1, 2}:
+        return "troi it may"
+    if weather_code == 3:
+        return "troi nhieu may"
+    if weather_code in {45, 48}:
+        return "co suong mu"
+    if weather_code in {51, 53, 55, 56, 57}:
+        return "co mua phun"
+    if weather_code in {61, 63, 65, 66, 67}:
+        return "dang mua"
+    if weather_code in {71, 73, 75, 77, 85, 86}:
+        return "co tuyet"
+    if weather_code in {80, 81, 82}:
+        return "co mua rao"
+    if weather_code in {95, 96, 99}:
+        return "co giong"
+    return "thoi tiet dang thay doi"
+
+
+def get_live_weather_snapshot(location_query: str) -> dict | None:
+    location = resolve_weather_location(location_query)
     if not location:
         return None
 
     now_ts = now_in_app_timezone().timestamp()
-    cached = LIVE_WEATHER_CACHE.get(location_key)
+    cache_key = simplify_text(location_query)
+    cached = LIVE_WEATHER_CACHE.get(cache_key)
     if cached and now_ts - cached.get("fetched_at", 0) < LIVE_WEATHER_CACHE_TTL_SECONDS:
         return cached["payload"]
 
@@ -2062,8 +2315,11 @@ def get_live_weather_snapshot(location_key: str) -> dict | None:
         {
             "latitude": location["latitude"],
             "longitude": location["longitude"],
-            "current": "temperature_2m,apparent_temperature,relative_humidity_2m",
-            "timezone": "Asia/Ho_Chi_Minh",
+            "current": (
+                "temperature_2m,apparent_temperature,relative_humidity_2m,"
+                "weather_code,is_day,precipitation,rain,showers,cloud_cover,wind_speed_10m"
+            ),
+            "timezone": location.get("timezone") or "auto",
             "forecast_days": 1,
         }
     )
@@ -2072,7 +2328,14 @@ def get_live_weather_snapshot(location_key: str) -> dict | None:
     try:
         with urllib_request.urlopen(url, timeout=2.5) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (TimeoutError, urllib_error.URLError, urllib_error.HTTPError, json.JSONDecodeError):
+    except (TimeoutError, urllib_error.URLError, urllib_error.HTTPError, json.JSONDecodeError) as error:
+        log_mobile_diag(
+            "weather_lookup_failed",
+            level="warning",
+            location_query=location_query,
+            weather_label=location.get("label"),
+            error=str(error),
+        )
         return None
 
     current = payload.get("current") or {}
@@ -2080,6 +2343,13 @@ def get_live_weather_snapshot(location_key: str) -> dict | None:
     apparent_temperature = current.get("apparent_temperature")
     humidity = current.get("relative_humidity_2m")
     observed_at = current.get("time")
+    weather_code = current.get("weather_code")
+    is_day = current.get("is_day")
+    precipitation = current.get("precipitation")
+    rain = current.get("rain")
+    showers = current.get("showers")
+    cloud_cover = current.get("cloud_cover")
+    wind_speed = current.get("wind_speed_10m")
     if temperature is None:
         return None
 
@@ -2089,11 +2359,33 @@ def get_live_weather_snapshot(location_key: str) -> dict | None:
         "apparent_temperature_c": float(apparent_temperature) if apparent_temperature is not None else None,
         "humidity_percent": int(humidity) if humidity is not None else None,
         "observed_at": observed_at or "",
+        "weather_code": int(weather_code) if weather_code is not None else None,
+        "is_day": int(is_day) if is_day is not None else None,
+        "precipitation_mm": float(precipitation) if precipitation is not None else None,
+        "rain_mm": float(rain) if rain is not None else None,
+        "showers_mm": float(showers) if showers is not None else None,
+        "cloud_cover_percent": int(cloud_cover) if cloud_cover is not None else None,
+        "wind_speed_kmh": float(wind_speed) if wind_speed is not None else None,
     }
-    LIVE_WEATHER_CACHE[location_key] = {
+    weather_payload["condition"] = describe_weather_condition(
+        weather_payload["weather_code"],
+        is_day=weather_payload["is_day"],
+        precipitation=weather_payload["precipitation_mm"],
+        rain=weather_payload["rain_mm"],
+        showers=weather_payload["showers_mm"],
+    )
+    LIVE_WEATHER_CACHE[cache_key] = {
         "fetched_at": now_ts,
         "payload": weather_payload,
     }
+    log_mobile_diag(
+        "weather_lookup_succeeded",
+        location_query=location_query,
+        weather_label=weather_payload["label"],
+        condition=weather_payload["condition"],
+        temperature_c=weather_payload["temperature_c"],
+        precipitation_mm=weather_payload["precipitation_mm"],
+    )
     return weather_payload
 
 
@@ -2103,18 +2395,20 @@ def build_live_context(question: str) -> str:
         f"- Thoi gian hien tai tai Viet Nam: {format_live_datetime(now_value)}.",
     ]
 
-    weather_location_key = extract_weather_location_key(question)
-    if weather_location_key:
-        weather = get_live_weather_snapshot(weather_location_key)
+    weather_location_query = extract_weather_location_query(question)
+    if weather_location_query:
+        weather = get_live_weather_snapshot(weather_location_query)
         if weather:
             weather_line = (
                 f"- Thoi tiet truc tiep tai {weather['label']}: "
-                f"{weather['temperature_c']:.1f} do C"
+                f"{weather['condition']}, {weather['temperature_c']:.1f} do C"
             )
             if weather.get("apparent_temperature_c") is not None:
                 weather_line += f", cam nhan {weather['apparent_temperature_c']:.1f} do C"
             if weather.get("humidity_percent") is not None:
                 weather_line += f", do am {weather['humidity_percent']}%"
+            if weather.get("wind_speed_kmh") is not None:
+                weather_line += f", gio {weather['wind_speed_kmh']:.1f} km/h"
             if weather.get("observed_at"):
                 weather_line += f", cap nhat luc {weather['observed_at']}"
             weather_line += "."
@@ -2136,21 +2430,26 @@ def build_realtime_reply(question: str, user_row: sqlite3.Row | None) -> str | N
             f"{format_vietnamese_weekday(now_value)}, ngay {now_value.strftime('%d/%m/%Y')}."
         )
 
-    weather_location_key = extract_weather_location_key(question)
-    if weather_location_key:
-        weather = get_live_weather_snapshot(weather_location_key)
+    weather_location_query = extract_weather_location_query(question)
+    if weather_location_query:
+        weather = get_live_weather_snapshot(weather_location_query)
         if weather:
             reply = (
-                f"Da {user_reference}, luc nay o {weather['label']} dang khoang "
-                f"{weather['temperature_c']:.1f} do C"
+                f"Da {user_reference}, luc nay o {weather['label']} {weather['condition']}, "
+                f"nhiet do khoang {weather['temperature_c']:.1f} do C"
             )
             if weather.get("apparent_temperature_c") is not None:
                 reply += f", cam nhan {weather['apparent_temperature_c']:.1f} do C"
             if weather.get("humidity_percent") is not None:
                 reply += f", do am {weather['humidity_percent']}%"
+            if weather.get("wind_speed_kmh") is not None:
+                reply += f", gio {weather['wind_speed_kmh']:.1f} km/h"
             reply += "."
             return reply
-        return f"Da {user_reference}, hien minh chua lay duoc thoi tiet truc tiep luc nay."
+        return (
+            f"Da {user_reference}, hien minh chua lay duoc thoi tiet truc tiep "
+            f"cho dia diem {weather_location_query} luc nay."
+        )
 
     return None
 
@@ -2249,6 +2548,12 @@ def build_unavailable_message(user_row: sqlite3.Row | None = None) -> str:
 def generate_reply(question: str, history: list[str]) -> str:
     realtime_reply = build_realtime_reply(question, g.current_user)
     if realtime_reply is not None:
+        log_mobile_diag(
+            "assistant_reply_generated",
+            source="realtime",
+            question_preview=question[:120],
+            reply_preview=realtime_reply[:160],
+        )
         remember_turn(history, question, realtime_reply)
         return realtime_reply
 
@@ -2276,6 +2581,12 @@ def generate_reply(question: str, history: list[str]) -> str:
             response = current_model.generate_content(prompt)
             reply = (getattr(response, "text", "") or "").strip()
             if reply:
+                log_mobile_diag(
+                    "assistant_reply_generated",
+                    source="gemini",
+                    question_preview=question[:120],
+                    reply_preview=reply[:160],
+                )
                 remember_turn(history, question, reply)
                 return reply
         except Exception as error:
@@ -3326,31 +3637,16 @@ def get_user_care_role_key(user_row: sqlite3.Row | None) -> str | None:
 def get_user_voice_title(user_row: sqlite3.Row | None) -> str:
     role_key = get_user_care_role_key(user_row)
     return {
-        "father": "Ba",
-        "mother": "Me",
-        "son": "Con",
-        "daughter": "Con",
-        "grandchild": "Chau",
         "grandfather": "Ông",
         "grandmother": "Bà",
-        "wife": "Minh",
-        "husband": "Minh",
-        "brother": "Anh",
-        "sister": "Chi",
-        "caregiver": "Anh chi",
-        "family_member": "Minh",
-        "elder": "Bác",
     }.get(role_key, "Bạn")
 
 
 def get_assistant_self_reference(user_row: sqlite3.Row | None) -> str:
     role_key = get_user_care_role_key(user_row)
     return {
-        "father": "con",
-        "mother": "con",
         "grandfather": "chau",
         "grandmother": "chau",
-        "elder": "chau",
     }.get(role_key, "minh")
 
 
@@ -4093,6 +4389,24 @@ def list_push_tokens_for_user(user_id: int) -> list[str]:
     return [row["push_token"] for row in rows]
 
 
+def deactivate_push_tokens(push_tokens: list[str]) -> None:
+    unique_tokens = [token for token in dict.fromkeys(push_tokens) if token]
+    if not unique_tokens:
+        return
+
+    placeholders = ", ".join("?" for _ in unique_tokens)
+    params = [utcnow_iso(), *unique_tokens]
+    get_db().execute(
+        f"""
+        UPDATE device_push_tokens
+        SET is_active = 0, updated_at = ?
+        WHERE push_token IN ({placeholders})
+        """,
+        params,
+    )
+    get_db().commit()
+
+
 def send_push_notification(
     *,
     target_user_id: int | None = None,
@@ -4149,15 +4463,21 @@ def send_push_notification(
         result = firebase_messaging.send_each_for_multicast(message, app=firebase_app)
         if result.failure_count:
             failed_tokens = []
+            inactive_tokens = []
             for index, response in enumerate(result.responses):
                 if response.success:
                     continue
+                error_text = str(response.exception)
+                if "NotRegistered" in error_text or "Unregistered" in error_text:
+                    inactive_tokens.append(unique_tokens[index])
                 failed_tokens.append(
                     {
                         "token_suffix": unique_tokens[index][-12:] if len(unique_tokens[index]) > 12 else unique_tokens[index],
-                        "error": str(response.exception),
+                        "error": error_text,
                     }
                 )
+            if inactive_tokens:
+                deactivate_push_tokens(inactive_tokens)
             app.logger.warning(
                 "Gui FCM xong nhung co loi: success=%s failure=%s details=%s",
                 result.success_count,

@@ -319,12 +319,10 @@ class AppController extends ChangeNotifier {
           ? await _apiService.getEmotionDashboard()
           : null;
       chatThreads = await _apiService.getFamilyChatThreads();
-      if (activeChatPartnerUserId != null) {
-        await _refreshActiveChatMessages(allowAutoSelect: false);
-      } else {
-        activeChatMessages = const [];
-        _syncChatPolling();
-      }
+      await _refreshActiveChatMessages(
+        allowAutoSelect: true,
+        refreshThreadsAfterFetch: false,
+      );
     } else {
       emotionDashboard = null;
       chatThreads = const [];
@@ -618,11 +616,11 @@ class AppController extends ChangeNotifier {
   }
 
   void _startIncomingCallWatcher() {
-    if (_incomingCallWatchTimer != null ||
-        _hasRegisteredPushTokenForCurrentUser) {
+    if (_incomingCallWatchTimer != null) {
       return;
     }
 
+    unawaited(_refreshIncomingCalls());
     _incomingCallWatchTimer = Timer.periodic(
       const Duration(seconds: AppConfig.incomingCallWatchIntervalSeconds),
       (_) async {
@@ -692,9 +690,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _refreshIncomingCalls() async {
-    if (_incomingCallWatchBusy ||
-        stage != AppStage.home ||
-        _hasRegisteredPushTokenForCurrentUser) {
+    if (_incomingCallWatchBusy || stage != AppStage.home) {
       return;
     }
     if (activeCall != null && !_isCallFinished(activeCall)) {
@@ -908,10 +904,15 @@ class AppController extends ChangeNotifier {
       (thread) => thread.partnerUserId == partnerUserId,
     );
     if (!threadExists) {
-      activeChatPartnerUserId = null;
-      activeChatMessages = const [];
-      _syncChatPolling();
-      return;
+      if (allowAutoSelect && chatThreads.isNotEmpty) {
+        partnerUserId = chatThreads.first.partnerUserId;
+        activeChatPartnerUserId = partnerUserId;
+      } else {
+        activeChatPartnerUserId = null;
+        activeChatMessages = const [];
+        _syncChatPolling();
+        return;
+      }
     }
 
     activeChatMessages = await _apiService.getFamilyChatMessages(partnerUserId);
