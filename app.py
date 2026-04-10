@@ -2353,12 +2353,21 @@ def normalize_weather_location_query(value: str) -> str:
         "hom qua",
         "tai day",
         "ra sao",
+        "ra sao nhi",
         "the nao",
+        "the nao nhi",
         "nhu nao",
+        "nhu the nao",
         "the nao vay",
+        "nhu the nao vay",
         "ra sao vay",
         "the nao a",
+        "nhu the nao a",
         "ra sao a",
+        "sao",
+        "sao nhi",
+        "sao a",
+        "sao vay",
         "cho toi biet",
         "giup toi",
         "giup minh",
@@ -2373,7 +2382,7 @@ def normalize_weather_location_query(value: str) -> str:
         "voi",
     )
     cleaned = simplified
-    for phrase in replacements:
+    for phrase in sorted(replacements, key=len, reverse=True):
         cleaned = re.sub(rf"\b{re.escape(phrase)}\b", " ", cleaned)
 
     prefixes = (
@@ -2389,7 +2398,7 @@ def normalize_weather_location_query(value: str) -> str:
     prefix_trimmed = True
     while prefix_trimmed:
         prefix_trimmed = False
-        for prefix in prefixes:
+        for prefix in sorted(prefixes, key=len, reverse=True):
             if cleaned.startswith(prefix):
                 cleaned = cleaned[len(prefix):].strip()
                 prefix_trimmed = True
@@ -2398,11 +2407,20 @@ def normalize_weather_location_query(value: str) -> str:
         "o dau",
         "the nao",
         "ra sao",
+        "ra sao nhi",
         "nhu nao",
+        "nhu the nao",
         "the nao vay",
+        "the nao nhi",
+        "nhu the nao vay",
         "ra sao vay",
         "the nao a",
+        "nhu the nao a",
         "ra sao a",
+        "sao",
+        "sao nhi",
+        "sao a",
+        "sao vay",
         "bay gio",
         "luc nay",
         "hom nay",
@@ -2416,7 +2434,7 @@ def normalize_weather_location_query(value: str) -> str:
     suffix_trimmed = True
     while suffix_trimmed:
         suffix_trimmed = False
-        for suffix in suffixes:
+        for suffix in sorted(suffixes, key=len, reverse=True):
             if cleaned.endswith(f" {suffix}"):
                 cleaned = cleaned[: -len(suffix)].strip()
                 suffix_trimmed = True
