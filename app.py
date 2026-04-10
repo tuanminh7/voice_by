@@ -1593,7 +1593,7 @@ def describe_call_target(
 
 def build_voice_confirmation_message(user_row: sqlite3.Row, target_label: str) -> str:
     user_title = get_user_voice_title(user_row)
-    return f"{user_title} muon goi {target_label}. Neu dung, {get_user_voice_reference(user_row)} hay noi 'xac nhan'."
+    return f"{user_title} muốn gọi {target_label}. Nếu đúng, {get_user_voice_reference(user_row)} hãy nói 'xác nhận'."
 
 
 @app.route("/api/calls/voice-intent", methods=["POST"])
@@ -1714,8 +1714,8 @@ def create_call_from_voice_intent():
             {
                 "action": "chat",
                 "message": (
-                    f"Da huy yeu cau goi. Minh tiep tuc tro chuyen voi "
-                    f"{get_user_voice_reference(g.current_user)} nhe."
+                    f"Đã hủy yêu cầu gọi. Mình tiếp tục trò chuyện với "
+                    f"{get_user_voice_reference(g.current_user)} nhé."
                 ),
             }
         )
@@ -1765,7 +1765,7 @@ def create_call_from_voice_intent():
 
     if intent.get("needs_confirmation") or not intent.get("relationship_key"):
         clear_pending_voice_call_intent()
-        question = intent.get("question") or f"{get_user_voice_title(g.current_user)} muon goi ai a?"
+        question = intent.get("question") or f"{get_user_voice_title(g.current_user)} muốn gọi ai ạ?"
         log_mobile_diag(
             "voice_intent_result",
             action="confirm",
@@ -2135,6 +2135,14 @@ def is_weather_question(text: str) -> bool:
 def normalize_weather_location_query(value: str) -> str:
     simplified = simplify_text(value)
     replacements = (
+        "noi cho toi biet",
+        "noi cho minh biet",
+        "cho toi biet",
+        "cho minh biet",
+        "noi giup toi",
+        "noi giup minh",
+        "doc giup toi",
+        "doc giup minh",
         "du bao thoi tiet",
         "thoi tiet hien tai",
         "thoi tiet",
@@ -2171,6 +2179,8 @@ def normalize_weather_location_query(value: str) -> str:
     for prefix in ("o ", "tai "):
         if cleaned.startswith(prefix):
             cleaned = cleaned[len(prefix):].strip()
+    if cleaned.startswith("cua "):
+        cleaned = cleaned[len("cua "):].strip()
 
     cleaned = re.sub(r"[^a-z0-9 ]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -2181,6 +2191,17 @@ def extract_weather_location_query(text: str) -> str | None:
     simplified = simplify_text(text)
     if not is_weather_question(simplified):
         return None
+
+    explicit_weather_matches = list(
+        re.finditer(
+            r"\b(?:thoi tiet|du bao thoi tiet|nhiet do)(?:\s+(?:cua|o|tai))?\s+([a-z0-9 ]+)",
+            simplified,
+        )
+    )
+    for match in reversed(explicit_weather_matches):
+        candidate = normalize_weather_location_query(match.group(1))
+        if candidate:
+            return candidate
 
     explicit_matches = list(re.finditer(r"\b(?:o|tai)\s+([a-z0-9 ]+)", simplified))
     for match in reversed(explicit_matches):
@@ -2392,7 +2413,7 @@ def get_live_weather_snapshot(location_query: str) -> dict | None:
 def build_live_context(question: str) -> str:
     now_value = now_in_app_timezone()
     lines = [
-        f"- Thoi gian hien tai tai Viet Nam: {format_live_datetime(now_value)}.",
+        f"- Thời gian hiện tại tại Việt Nam: {format_live_datetime(now_value)}.",
     ]
 
     weather_location_query = extract_weather_location_query(question)
@@ -2400,21 +2421,21 @@ def build_live_context(question: str) -> str:
         weather = get_live_weather_snapshot(weather_location_query)
         if weather:
             weather_line = (
-                f"- Thoi tiet truc tiep tai {weather['label']}: "
-                f"{weather['condition']}, {weather['temperature_c']:.1f} do C"
+                f"- Thời tiết trực tiếp tại {weather['label']}: "
+                f"{weather['condition']}, {weather['temperature_c']:.1f} độ C"
             )
             if weather.get("apparent_temperature_c") is not None:
-                weather_line += f", cam nhan {weather['apparent_temperature_c']:.1f} do C"
+                weather_line += f", cảm nhận {weather['apparent_temperature_c']:.1f} độ C"
             if weather.get("humidity_percent") is not None:
-                weather_line += f", do am {weather['humidity_percent']}%"
+                weather_line += f", độ ẩm {weather['humidity_percent']}%"
             if weather.get("wind_speed_kmh") is not None:
-                weather_line += f", gio {weather['wind_speed_kmh']:.1f} km/h"
+                weather_line += f", gió {weather['wind_speed_kmh']:.1f} km/h"
             if weather.get("observed_at"):
-                weather_line += f", cap nhat luc {weather['observed_at']}"
+                weather_line += f", cập nhật lúc {weather['observed_at']}"
             weather_line += "."
             lines.append(weather_line)
         else:
-            lines.append("- Chua lay duoc du lieu thoi tiet truc tiep luc nay.")
+            lines.append("- Chưa lấy được dữ liệu thời tiết trực tiếp lúc này.")
 
     return "\n".join(lines)
 
@@ -2426,8 +2447,8 @@ def build_realtime_reply(question: str, user_row: sqlite3.Row | None) -> str | N
 
     if is_current_time_question(question) or is_current_date_question(question):
         return (
-            f"Da {user_reference}, bay gio la {now_value.strftime('%H:%M')}, "
-            f"{format_vietnamese_weekday(now_value)}, ngay {now_value.strftime('%d/%m/%Y')}."
+            f"Dạ {user_reference}, bây giờ là {now_value.strftime('%H:%M')}, "
+            f"{format_vietnamese_weekday(now_value)}, ngày {now_value.strftime('%d/%m/%Y')}."
         )
 
     weather_location_query = extract_weather_location_query(question)
@@ -2435,20 +2456,20 @@ def build_realtime_reply(question: str, user_row: sqlite3.Row | None) -> str | N
         weather = get_live_weather_snapshot(weather_location_query)
         if weather:
             reply = (
-                f"Da {user_reference}, luc nay o {weather['label']} {weather['condition']}, "
-                f"nhiet do khoang {weather['temperature_c']:.1f} do C"
+                f"Dạ {user_reference}, lúc này ở {weather['label']} {weather['condition']}, "
+                f"nhiệt độ khoảng {weather['temperature_c']:.1f} độ C"
             )
             if weather.get("apparent_temperature_c") is not None:
-                reply += f", cam nhan {weather['apparent_temperature_c']:.1f} do C"
+                reply += f", cảm nhận {weather['apparent_temperature_c']:.1f} độ C"
             if weather.get("humidity_percent") is not None:
-                reply += f", do am {weather['humidity_percent']}%"
+                reply += f", độ ẩm {weather['humidity_percent']}%"
             if weather.get("wind_speed_kmh") is not None:
-                reply += f", gio {weather['wind_speed_kmh']:.1f} km/h"
+                reply += f", gió {weather['wind_speed_kmh']:.1f} km/h"
             reply += "."
             return reply
         return (
-            f"Da {user_reference}, hien minh chua lay duoc thoi tiet truc tiep "
-            f"cho dia diem {weather_location_query} luc nay."
+            f"Dạ {user_reference}, hiện mình chưa lấy được thời tiết trực tiếp "
+            f"cho địa điểm {weather_location_query} lúc này."
         )
 
     return None
@@ -2539,7 +2560,7 @@ def build_unavailable_message(user_row: sqlite3.Row | None = None) -> str:
 
     if not has_server_gemini_key_pool():
         return (
-            "Da, he thong chua duoc cau hinh Gemini API key tren server nen toi chua the tra loi AI."
+            "Dạ, hệ thống chưa được cấu hình Gemini API key trên server nên tôi chưa thể trả lời AI."
         )
 
     return "Dạ, hiện tôi chưa sẵn sàng để phản hồi. Bạn thử lại giúp tôi nhé."
@@ -2605,8 +2626,8 @@ def generate_reply(question: str, history: list[str]) -> str:
         **build_gemini_diag_context(g.current_user),
     )
     reply = (
-        "Da, trong luc ket noi tro ly da co loi xay ra. "
-        "Ban thu lai sau it phut giup minh nhe."
+        "Dạ, trong lúc kết nối trợ lý đã có lỗi xảy ra. "
+        "Bạn thử lại sau ít phút giúp mình nhé."
     )
     if last_error is None:
         reply = "Dạ, tôi chưa tạo được câu trả lời phù hợp. Bạn thử hỏi lại một chút nhé."
@@ -3166,6 +3187,7 @@ def simplify_text(value: str) -> str:
     lowered = (value or "").strip().lower()
     normalized = unicodedata.normalize("NFD", lowered)
     without_marks = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
+    without_marks = without_marks.replace("đ", "d").replace("Đ", "d")
     return re.sub(r"\s+", " ", without_marks).strip()
 
 
@@ -4891,7 +4913,7 @@ def detect_call_intent(text: str, relationship_rows: list[sqlite3.Row]) -> dict:
             "relationship_key": None,
             "confidence": 0.45,
             "needs_confirmation": True,
-            "question": f"{get_user_voice_title(g.current_user)} muon goi {', '.join(names)} a?",
+            "question": f"{get_user_voice_title(g.current_user)} muốn gọi {', '.join(names)} ạ?",
         }
 
     alias_map = build_relationship_call_aliases(relationship_rows)
@@ -4920,7 +4942,7 @@ def detect_call_intent(text: str, relationship_rows: list[sqlite3.Row]) -> dict:
             "relationship_key": None,
             "confidence": 0.4,
             "needs_confirmation": True,
-            "question": f"{get_user_voice_title(g.current_user)} muon goi {', '.join(labels)} a?",
+            "question": f"{get_user_voice_title(g.current_user)} muốn gọi {', '.join(labels)} ạ?",
         }
 
     if len(available_relationship_keys) == 1 and is_generic_call_request:
@@ -4940,8 +4962,8 @@ def detect_call_intent(text: str, relationship_rows: list[sqlite3.Row]) -> dict:
             "confidence": 0.35,
             "needs_confirmation": True,
             "question": (
-                f"Minh chua khop dung nguoi {get_user_voice_reference(g.current_user)} muon goi. "
-                f"Hien gia dinh dang cau hinh: {', '.join(labels)}."
+                f"Mình chưa khớp đúng người {get_user_voice_reference(g.current_user)} muốn gọi. "
+                f"Hiện gia đình đang cấu hình: {', '.join(labels)}."
             ),
         }
 
