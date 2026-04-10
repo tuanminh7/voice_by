@@ -62,6 +62,7 @@ class AppController extends ChangeNotifier {
   bool _chatPollBusy = false;
   bool _homeRealtimeSyncBusy = false;
   bool _homeRealtimeSyncQueued = false;
+  String? _pendingVoiceCallToken;
 
   bool get hasRealtimeCallConfig => _callService.isConfigured;
   bool get hasPushMessagingConfig => _messagingService.isAvailable;
@@ -206,6 +207,7 @@ class AppController extends ChangeNotifier {
     callHistory = const [];
     activeCall = null;
     latestVoiceAssistantResult = null;
+    _pendingVoiceCallToken = null;
     stage = AppStage.auth;
     errorMessage = message;
     notifyListeners();
@@ -219,6 +221,7 @@ class AppController extends ChangeNotifier {
     _stopChatPolling();
     _callService.clearActiveCall();
     activeCall = null;
+    _pendingVoiceCallToken = null;
     stage = nextStage;
     errorMessage = message;
     notifyListeners();
@@ -422,7 +425,9 @@ class AppController extends ChangeNotifier {
       latestVoiceAssistantResult = await _apiService.submitVoiceInput(
         transcriptText,
         realtimeCallReady: hasRealtimeCallConfig,
+        pendingCallToken: _pendingVoiceCallToken,
       );
+      _pendingVoiceCallToken = latestVoiceAssistantResult?.pendingCallToken;
       final createdCall = latestVoiceAssistantResult?.call;
       if (createdCall != null) {
         activeCall = createdCall;
@@ -450,10 +455,11 @@ class AppController extends ChangeNotifier {
     if (partnerUserId == null) {
       return;
     }
+    final resolvedPartnerUserId = partnerUserId;
 
     await _runBusy(() async {
       final sentMessage = await _apiService.sendFamilyChatMessage(
-        recipientUserId: partnerUserId,
+        recipientUserId: resolvedPartnerUserId,
         messageText: messageText,
       );
       activeChatMessages = [...activeChatMessages, sentMessage];
@@ -537,7 +543,9 @@ class AppController extends ChangeNotifier {
             'Đang gọi lại ${session.relationshipLabel ?? session.relationshipKey}.',
         question: null,
         call: restartedCall,
+        pendingCallToken: null,
       );
+      _pendingVoiceCallToken = null;
       activeCall = restartedCall;
       _mergeCallIntoHistory(restartedCall);
       _syncActiveCallFromHistory();
@@ -569,6 +577,7 @@ class AppController extends ChangeNotifier {
       bootstrapState = null;
       activeCall = null;
       latestVoiceAssistantResult = null;
+      _pendingVoiceCallToken = null;
       profile = null;
       family = null;
       pendingInvitations = const [];
@@ -989,7 +998,7 @@ class AppController extends ChangeNotifier {
     } else {
       _stopPollingCall();
       _callService.clearActiveCall();
-      if (stage == AppStage.home && !_hasRegisteredPushTokenForCurrentUser) {
+      if (stage == AppStage.home && profile != null) {
         _startIncomingCallWatcher();
       } else {
         _stopIncomingCallWatcher();

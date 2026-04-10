@@ -232,12 +232,14 @@ class VoiceAssistantResult {
     required this.message,
     required this.question,
     required this.call,
+    required this.pendingCallToken,
   });
 
   final String action;
   final String message;
   final String? question;
   final CallSession? call;
+  final String? pendingCallToken;
 
   bool get isCalling => action == 'calling' && call != null;
   bool get isConfirmationRequired => action == 'confirm';
@@ -254,6 +256,7 @@ class VoiceAssistantResult {
       call: json['call'] is Map<String, dynamic>
           ? CallSession.fromJson(json['call'] as Map<String, dynamic>)
           : null,
+      pendingCallToken: json['pending_call_token'] as String?,
     );
   }
 }

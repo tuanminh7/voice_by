@@ -10,9 +10,20 @@ import '../models/app_models.dart';
 import 'local_store.dart';
 
 class ApiException implements Exception {
-  ApiException(this.message);
+  ApiException(
+    this.message, {
+    this.statusCode,
+    this.code,
+  });
 
   final String message;
+  final int? statusCode;
+  final String? code;
+
+  bool get isAuthRequired => statusCode == 401 || code == 'auth_required';
+  bool get isPinRequired => statusCode == 403 && code == 'pin_required';
+  bool get isPinNotConfigured =>
+      statusCode == 403 && code == 'pin_not_configured';
 
   @override
   String toString() => message;
@@ -66,13 +77,19 @@ class ApiService {
 
     if (error is DioException) {
       final data = error.response?.data;
+      final statusCode = error.response?.statusCode;
       if (data is Map<String, dynamic> && data['error'] is String) {
-        return ApiException(data['error'] as String);
+        return ApiException(
+          data['error'] as String,
+          statusCode: statusCode,
+          code: data['code'] as String?,
+        );
       }
       if (_isConnectionError(error)) {
         if (error.type == DioExceptionType.receiveTimeout) {
           return ApiException(
-            'Server đang phản hồi chậm hoặc đang khởi động lại. Nếu đang dùng Render, bạn hãy đợi thêm khoảng 20-60 giây rồi thử lại.\n\n${AppConfig.backendConnectionHint}',
+            'Server dang phan hoi cham hoac dang khoi dong lai. Neu dang dung Render, hay doi them 20-60 giay roi thu lai.\n\n${AppConfig.backendConnectionHint}',
+            statusCode: statusCode,
           );
         }
         final rawMessage = [
@@ -80,9 +97,15 @@ class ApiService {
           if (error.error is SocketException)
             (error.error as SocketException).message,
         ].whereType<String>().join(' | ');
-        return ApiException(_buildConnectionErrorMessage(rawMessage));
+        return ApiException(
+          _buildConnectionErrorMessage(rawMessage),
+          statusCode: statusCode,
+        );
       }
-      return ApiException(error.message ?? 'Yeu cau that bai.');
+      return ApiException(
+        error.message ?? 'Yeu cau that bai.',
+        statusCode: statusCode,
+      );
     }
     return ApiException(error.toString());
   }
@@ -217,7 +240,22 @@ class ApiService {
   Future<void> logout() async {
     try {
       await _dio.post<Map<String, dynamic>>('/api/auth/logout');
-      await _store.savePinToken(null);
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
+  Future<void> unregisterPushToken({
+    String? pushToken,
+  }) async {
+    try {
+      await _dio.post<Map<String, dynamic>>(
+        '/api/device-push-tokens/unregister',
+        data: {
+          if (pushToken != null && pushToken.isNotEmpty)
+            'push_token': pushToken,
+        },
+      );
     } catch (error) {
       throw _toApiException(error);
     }
@@ -496,6 +534,7 @@ class ApiService {
   Future<VoiceAssistantResult> submitVoiceInput(
     String transcriptText, {
     required bool realtimeCallReady,
+    String? pendingCallToken,
   }) async {
     try {
       final response = await _dio.post<Map<String, dynamic>>(
@@ -503,6 +542,8 @@ class ApiService {
         data: {
           'transcript_text': transcriptText,
           'realtime_call_ready': realtimeCallReady,
+          if (pendingCallToken != null && pendingCallToken.isNotEmpty)
+            'pending_call_token': pendingCallToken,
         },
       );
       return VoiceAssistantResult.fromJson(response.data ?? const {});

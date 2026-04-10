@@ -47,6 +47,7 @@ PIN_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 12
 PIN_LOCK_MINUTES = 5
 PIN_MAX_ATTEMPTS = 5
 RESET_TOKEN_MINUTES = 30
+PENDING_VOICE_CALL_TOKEN_MAX_AGE_SECONDS = 60 * 10
 CALL_PROVIDER = (os.getenv("CALL_PROVIDER", "zegocloud") or "zegocloud").strip().lower()
 CALL_RING_TIMEOUT_SECONDS = int(os.getenv("CALL_RING_TIMEOUT_SECONDS", "30"))
 CALL_MAX_TARGETS = int(os.getenv("CALL_MAX_TARGETS", "3"))
@@ -115,6 +116,7 @@ knowledge = KNOWLEDGE_PATH.read_text(encoding="utf-8") if KNOWLEDGE_PATH.exists(
 knowledge_chunks = [line.strip() for line in knowledge.splitlines() if line.strip()]
 chat_store = defaultdict(list)
 pin_serializer = URLSafeTimedSerializer(app.config["SECRET_KEY"], salt="device-pin-token")
+pending_voice_call_serializer = URLSafeTimedSerializer(app.config["SECRET_KEY"], salt="pending-voice-call")
 firebase_push_app = None
 firebase_push_init_attempted = False
 
@@ -1528,6 +1530,66 @@ def save_pending_voice_call_intent(
     session.modified = True
 
 
+def issue_pending_voice_call_token(
+    pending_intent: dict,
+    *,
+    user_id: int,
+    device_id: str,
+) -> str:
+    payload = {
+        "user_id": user_id,
+        "device_id": device_id,
+        "relationship_key": pending_intent.get("relationship_key"),
+        "relative_user_id": pending_intent.get("relative_user_id"),
+        "transcript_text": pending_intent.get("transcript_text"),
+        "target_label": pending_intent.get("target_label"),
+        "created_at": pending_intent.get("created_at"),
+    }
+    return pending_voice_call_serializer.dumps(payload)
+
+
+def load_pending_voice_call_token(
+    raw_token: str,
+    *,
+    user_id: int,
+    device_id: str,
+) -> dict | None:
+    if not raw_token:
+        return None
+
+    try:
+        payload = pending_voice_call_serializer.loads(
+            raw_token,
+            max_age=PENDING_VOICE_CALL_TOKEN_MAX_AGE_SECONDS,
+        )
+    except (BadSignature, SignatureExpired):
+        return None
+
+    if payload.get("user_id") != user_id or payload.get("device_id") != device_id:
+        return None
+
+    relationship_key = (payload.get("relationship_key") or "").strip()
+    transcript_text = (payload.get("transcript_text") or "").strip()
+    target_label = (payload.get("target_label") or "").strip()
+    if not relationship_key or not transcript_text or not target_label:
+        return None
+
+    relative_user_id = payload.get("relative_user_id")
+    if relative_user_id is not None:
+        try:
+            relative_user_id = int(relative_user_id)
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "relationship_key": relationship_key,
+        "relative_user_id": relative_user_id,
+        "transcript_text": transcript_text,
+        "target_label": target_label,
+        "created_at": payload.get("created_at") or "",
+    }
+
+
 def is_voice_confirmation_reply(text: str) -> bool:
     simplified = simplify_text(text)
     confirmation_phrases = (
@@ -1601,6 +1663,7 @@ def build_voice_confirmation_message(user_row: sqlite3.Row, target_label: str) -
 def create_call_from_voice_intent():
     payload = require_json()
     transcript_text = (payload.get("transcript_text") or "").strip()
+    raw_pending_call_token = (payload.get("pending_call_token") or "").strip()
     raw_realtime_call_ready = payload.get("realtime_call_ready")
     if raw_realtime_call_ready is None:
         realtime_call_ready = True
@@ -1613,6 +1676,14 @@ def create_call_from_voice_intent():
 
     relationship_rows = list_call_relationship_rows(g.current_user["id"])
     pending_intent = get_pending_voice_call_intent()
+    pending_intent_from_token = False
+    if not pending_intent and raw_pending_call_token:
+        pending_intent = load_pending_voice_call_token(
+            raw_pending_call_token,
+            user_id=g.current_user["id"],
+            device_id=g.current_device["device_id"],
+        )
+        pending_intent_from_token = bool(pending_intent)
     family_chat_intent = detect_family_chat_intent(transcript_text, g.current_user["id"])
     intent = detect_call_intent(transcript_text, relationship_rows)
     log_mobile_diag(
@@ -1620,6 +1691,8 @@ def create_call_from_voice_intent():
         transcript_preview=transcript_text[:120],
         realtime_call_ready=realtime_call_ready,
         pending_intent_present=bool(pending_intent),
+        pending_intent_from_token=pending_intent_from_token,
+        pending_call_token_present=bool(raw_pending_call_token),
         call_intent_type=intent.get("type"),
         family_chat_intent_type=family_chat_intent.get("type"),
         **build_gemini_diag_context(g.current_user),
@@ -1675,6 +1748,18 @@ def create_call_from_voice_intent():
             }
         )
 
+    if not pending_intent and is_voice_confirmation_reply(transcript_text):
+        return voice_json_response(
+            "chat",
+            "Hiện chưa có cuộc gọi nào chờ xác nhận. Bạn hãy nói như \"Gọi con trai\" trước nhé.",
+        )
+
+    if not pending_intent and is_voice_cancel_reply(transcript_text):
+        return voice_json_response(
+            "chat",
+            "Hiện chưa có cuộc gọi nào để hủy. Nếu muốn gọi người thân, bạn hãy nói như \"Gọi con trai\" nhé.",
+        )
+
     if pending_intent and is_voice_confirmation_reply(transcript_text):
         session_row = create_call_session_for_relationship(
             caller_user_id=g.current_user["id"],
@@ -1726,6 +1811,11 @@ def create_call_from_voice_intent():
                 g.current_user,
                 pending_intent["target_label"],
             )
+            pending_call_token = issue_pending_voice_call_token(
+                pending_intent,
+                user_id=g.current_user["id"],
+                device_id=g.current_device["device_id"],
+            )
             log_mobile_diag(
                 "voice_intent_result",
                 action="confirm",
@@ -1738,6 +1828,7 @@ def create_call_from_voice_intent():
                     "action": "confirm",
                     "message": reminder_message,
                     "question": reminder_message,
+                    "pending_call_token": pending_call_token,
                 }
             )
 
@@ -1794,6 +1885,18 @@ def create_call_from_voice_intent():
         transcript_text=transcript_text,
         target_label=target_label,
     )
+    pending_intent = get_pending_voice_call_intent() or {
+        "relationship_key": intent["relationship_key"],
+        "relative_user_id": intent.get("relative_user_id"),
+        "transcript_text": transcript_text,
+        "target_label": target_label,
+        "created_at": "",
+    }
+    pending_call_token = issue_pending_voice_call_token(
+        pending_intent,
+        user_id=g.current_user["id"],
+        device_id=g.current_device["device_id"],
+    )
     confirmation_message = build_voice_confirmation_message(
         g.current_user,
         target_label,
@@ -1812,6 +1915,7 @@ def create_call_from_voice_intent():
             "action": "confirm",
             "message": confirmation_message,
             "question": confirmation_message,
+            "pending_call_token": pending_call_token,
         }
     )
 
