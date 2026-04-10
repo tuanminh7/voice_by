@@ -95,11 +95,29 @@ WEATHER_LOCATIONS = {
         "longitude": 105.8542,
         "timezone": "Asia/Ho_Chi_Minh",
     },
+    "khanh hoa": {
+        "label": "Khanh Hoa",
+        "latitude": 12.2585,
+        "longitude": 109.0526,
+        "timezone": "Asia/Ho_Chi_Minh",
+    },
+    "quang ninh": {
+        "label": "Quang Ninh",
+        "latitude": 20.9511,
+        "longitude": 107.0848,
+        "timezone": "Asia/Ho_Chi_Minh",
+    },
 }
 WEATHER_LOCATION_ALIASES = {
     "hanoi": "ha noi",
     "hn": "ha noi",
     "ha noi": "ha noi",
+    "ha noi city": "ha noi",
+    "thanh pho ha noi": "ha noi",
+    "khanh hoa": "khanh hoa",
+    "tinh khanh hoa": "khanh hoa",
+    "quang ninh": "quang ninh",
+    "tinh quang ninh": "quang ninh",
     "tphcm": "ho chi minh city",
     "tp hcm": "ho chi minh city",
     "hcm": "ho chi minh city",
@@ -1641,6 +1659,51 @@ def is_voice_cancel_reply(text: str) -> bool:
     return False
 
 
+def classify_voice_request(
+    text: str,
+    relationship_rows: list[sqlite3.Row],
+    pending_intent: dict | None,
+    *,
+    owner_user_id: int,
+) -> dict:
+    family_chat_intent = detect_family_chat_intent(text, owner_user_id)
+    call_intent = detect_call_intent(text, relationship_rows)
+    request_type = "general_chat"
+    request_subtype = None
+
+    if is_weather_question(text):
+        request_type = "realtime_info"
+        request_subtype = "weather"
+    elif is_current_time_question(text) or is_current_date_question(text):
+        request_type = "realtime_info"
+        request_subtype = "time"
+    elif family_chat_intent.get("type") == "family_chat":
+        request_type = "family_chat"
+    elif pending_intent and is_voice_confirmation_reply(text):
+        request_type = "call_confirm"
+    elif pending_intent and is_voice_cancel_reply(text):
+        request_type = "call_cancel"
+    elif call_intent.get("type") == "call":
+        request_type = "call_start"
+    elif not pending_intent and is_voice_confirmation_reply(text):
+        request_type = "orphan_confirmation"
+    elif not pending_intent and is_voice_cancel_reply(text):
+        request_type = "orphan_cancel"
+
+    return {
+        "type": request_type,
+        "subtype": request_subtype,
+        "call_intent": call_intent,
+        "family_chat_intent": family_chat_intent,
+        "release_pending_call": bool(pending_intent) and request_type in {
+            "realtime_info",
+            "family_chat",
+            "call_start",
+            "general_chat",
+        },
+    }
+
+
 def describe_call_target(
     relationship_key: str,
     relationship_rows: list[sqlite3.Row],
@@ -1693,8 +1756,14 @@ def create_call_from_voice_intent():
             device_id=g.current_device["device_id"],
         )
         pending_intent_from_token = bool(pending_intent)
-    family_chat_intent = detect_family_chat_intent(transcript_text, g.current_user["id"])
-    intent = detect_call_intent(transcript_text, relationship_rows)
+    voice_request = classify_voice_request(
+        transcript_text,
+        relationship_rows,
+        pending_intent,
+        owner_user_id=g.current_user["id"],
+    )
+    family_chat_intent = voice_request["family_chat_intent"]
+    intent = voice_request["call_intent"]
     log_mobile_diag(
         "voice_intent_received",
         transcript_preview=transcript_text[:120],
@@ -1702,16 +1771,18 @@ def create_call_from_voice_intent():
         pending_intent_present=bool(pending_intent),
         pending_intent_from_token=pending_intent_from_token,
         pending_call_token_present=bool(raw_pending_call_token),
+        voice_request_type=voice_request.get("type"),
+        voice_request_subtype=voice_request.get("subtype"),
         call_intent_type=intent.get("type"),
         family_chat_intent_type=family_chat_intent.get("type"),
         **build_gemini_diag_context(g.current_user),
     )
 
-    if pending_intent and (intent.get("type") == "call" or family_chat_intent.get("type") == "family_chat"):
+    if pending_intent and voice_request.get("release_pending_call"):
         clear_pending_voice_call_intent()
         pending_intent = None
 
-    if family_chat_intent.get("type") == "family_chat":
+    if voice_request.get("type") == "family_chat":
         if family_chat_intent.get("needs_confirmation"):
             return voice_json_response(
                 "chat",
@@ -1739,7 +1810,7 @@ def create_call_from_voice_intent():
             chat_message=message_payload,
         )
 
-    if not realtime_call_ready and intent.get("type") == "call":
+    if not realtime_call_ready and voice_request.get("type") == "call_start":
         clear_pending_voice_call_intent()
         log_mobile_diag(
             "voice_intent_result",
@@ -1757,19 +1828,19 @@ def create_call_from_voice_intent():
             }
         )
 
-    if not pending_intent and is_voice_confirmation_reply(transcript_text):
+    if voice_request.get("type") == "orphan_confirmation":
         return voice_json_response(
             "chat",
             "Hiện chưa có cuộc gọi nào chờ xác nhận. Bạn hãy nói như \"Gọi con trai\" trước nhé.",
         )
 
-    if not pending_intent and is_voice_cancel_reply(transcript_text):
+    if voice_request.get("type") == "orphan_cancel":
         return voice_json_response(
             "chat",
             "Hiện chưa có cuộc gọi nào để hủy. Nếu muốn gọi người thân, bạn hãy nói như \"Gọi con trai\" nhé.",
         )
 
-    if pending_intent and is_voice_confirmation_reply(transcript_text):
+    if voice_request.get("type") == "call_confirm":
         session_row = create_call_session_for_relationship(
             caller_user_id=g.current_user["id"],
             relationship_key=pending_intent["relationship_key"],
@@ -1796,7 +1867,7 @@ def create_call_from_voice_intent():
             }
         )
 
-    if pending_intent and is_voice_cancel_reply(transcript_text):
+    if voice_request.get("type") == "call_cancel":
         clear_pending_voice_call_intent()
         log_mobile_diag(
             "voice_intent_result",
@@ -1814,7 +1885,7 @@ def create_call_from_voice_intent():
             }
         )
 
-    if intent.get("type") != "call":
+    if voice_request.get("type") != "call_start":
         if pending_intent:
             reminder_message = build_voice_confirmation_message(
                 g.current_user,
@@ -2248,6 +2319,10 @@ def is_weather_question(text: str) -> bool:
 def normalize_weather_location_query(value: str) -> str:
     simplified = simplify_text(value)
     replacements = (
+        "hay cho toi biet",
+        "hay cho minh biet",
+        "ban cho toi biet",
+        "ban cho minh biet",
         "noi cho toi biet",
         "noi cho minh biet",
         "cho toi biet",
@@ -2275,25 +2350,79 @@ def normalize_weather_location_query(value: str) -> str:
         "bay gio",
         "hom nay",
         "ngay mai",
+        "hom qua",
+        "tai day",
         "ra sao",
         "the nao",
+        "nhu nao",
+        "the nao vay",
+        "ra sao vay",
+        "the nao a",
+        "ra sao a",
         "cho toi biet",
         "giup toi",
+        "giup minh",
         "xem giup",
         "xem dum",
         "xem ho",
         "xem",
+        "duoc khong",
+        "khong vay",
+        "nhe",
+        "nha",
         "voi",
     )
     cleaned = simplified
     for phrase in replacements:
         cleaned = re.sub(rf"\b{re.escape(phrase)}\b", " ", cleaned)
 
-    for prefix in ("o ", "tai "):
-        if cleaned.startswith(prefix):
-            cleaned = cleaned[len(prefix):].strip()
-    if cleaned.startswith("cua "):
-        cleaned = cleaned[len("cua "):].strip()
+    prefixes = (
+        "o ",
+        "tai ",
+        "cua ",
+        "vung ",
+        "khu vuc ",
+        "thanh pho ",
+        "tp ",
+        "tinh ",
+    )
+    prefix_trimmed = True
+    while prefix_trimmed:
+        prefix_trimmed = False
+        for prefix in prefixes:
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+                prefix_trimmed = True
+
+    suffixes = (
+        "o dau",
+        "the nao",
+        "ra sao",
+        "nhu nao",
+        "the nao vay",
+        "ra sao vay",
+        "the nao a",
+        "ra sao a",
+        "bay gio",
+        "luc nay",
+        "hom nay",
+        "ngay mai",
+        "hom qua",
+        "duoc khong",
+        "khong vay",
+        "nhe",
+        "nha",
+    )
+    suffix_trimmed = True
+    while suffix_trimmed:
+        suffix_trimmed = False
+        for suffix in suffixes:
+            if cleaned.endswith(f" {suffix}"):
+                cleaned = cleaned[: -len(suffix)].strip()
+                suffix_trimmed = True
+            elif cleaned == suffix:
+                cleaned = ""
+                suffix_trimmed = True
 
     cleaned = re.sub(r"[^a-z0-9 ]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -2307,11 +2436,23 @@ def extract_weather_location_query(text: str) -> str | None:
 
     explicit_weather_matches = list(
         re.finditer(
-            r"\b(?:thoi tiet|du bao thoi tiet|nhiet do)(?:\s+(?:cua|o|tai))?\s+([a-z0-9 ]+)",
+            r"\b(?:thoi tiet|du bao thoi tiet|nhiet do)(?:\s+(?:cua|o|tai))?\s+(.+)$",
             simplified,
         )
     )
     for match in reversed(explicit_weather_matches):
+        candidate = normalize_weather_location_query(match.group(1))
+        if candidate:
+            return candidate
+
+    reversed_weather_matches = list(
+        re.finditer(
+            r"^(.+?)\s+(?:hom nay\s+|ngay mai\s+|luc nay\s+|bay gio\s+)?"
+            r"(?:thoi tiet|du bao thoi tiet|nhiet do)\b",
+            simplified,
+        )
+    )
+    for match in reversed(reversed_weather_matches):
         candidate = normalize_weather_location_query(match.group(1))
         if candidate:
             return candidate
@@ -2324,6 +2465,42 @@ def extract_weather_location_query(text: str) -> str | None:
 
     candidate = normalize_weather_location_query(simplified)
     return candidate or None
+
+
+def score_weather_geocode_result(location_query: str, row: dict) -> float:
+    normalized_query = normalize_weather_location_query(location_query)
+    name = simplify_text(row.get("name") or "")
+    admin1 = simplify_text(row.get("admin1") or "")
+    admin2 = simplify_text(row.get("admin2") or "")
+    country = simplify_text(row.get("country") or "")
+    country_code = (row.get("country_code") or "").strip().upper()
+    feature_code = (row.get("feature_code") or "").strip().upper()
+    population = float(row.get("population") or 0)
+    score = 0.0
+
+    if country_code == "VN" or country == "viet nam":
+        score += 50
+    if normalized_query and normalized_query == name:
+        score += 120
+    if normalized_query and normalized_query == admin1:
+        score += 110
+    if normalized_query and normalized_query == admin2:
+        score += 90
+    if normalized_query and name and normalized_query in name:
+        score += 16
+    if normalized_query and admin1 and normalized_query in admin1:
+        score += 14
+    if feature_code == "ADM1":
+        score += 18
+    elif feature_code.startswith("ADM"):
+        score += 12
+    elif feature_code == "PPLC":
+        score += 10
+    elif feature_code.startswith("PPL"):
+        score += 6
+
+    score += min(population / 1_000_000, 10)
+    return score
 
 
 def resolve_weather_location(location_query: str) -> dict | None:
@@ -2343,7 +2520,7 @@ def resolve_weather_location(location_query: str) -> dict | None:
     params = urllib_parse.urlencode(
         {
             "name": normalized_query,
-            "count": 1,
+            "count": 8,
             "language": "vi",
             "format": "json",
         }
@@ -2370,7 +2547,14 @@ def resolve_weather_location(location_query: str) -> dict | None:
         )
         return None
 
-    row = rows[0]
+    vietnam_rows = [
+        row
+        for row in rows
+        if (row.get("country_code") or "").strip().upper() == "VN"
+        or simplify_text(row.get("country") or "") == "viet nam"
+    ]
+    candidate_rows = vietnam_rows or rows
+    row = max(candidate_rows, key=lambda item: score_weather_geocode_result(normalized_query, item))
     parts = [row.get("name"), row.get("admin1"), row.get("country")]
     label_parts = []
     for part in parts:
