@@ -1614,22 +1614,31 @@ def is_voice_confirmation_reply(text: str) -> bool:
 
 def is_voice_cancel_reply(text: str) -> bool:
     simplified = simplify_text(text)
+    if is_weather_question(simplified):
+        return False
+
     cancel_phrases = (
         "huy",
         "huy bo",
         "thoi",
+        "thoi khoi goi",
+        "thoi khong goi nua",
         "dung lai",
         "khong goi",
+        "khong goi nua",
         "khong can",
+        "khong can goi",
         "khong dong y",
         "bo qua",
     )
-    return any(
-        simplified == phrase
-        or simplified.startswith(f"{phrase} ")
-        or simplified.endswith(f" {phrase}")
-        for phrase in cancel_phrases
-    )
+    for phrase in cancel_phrases:
+        if simplified == phrase:
+            return True
+        if phrase == "thoi":
+            continue
+        if simplified.startswith(f"{phrase} ") or simplified.endswith(f" {phrase}"):
+            return True
+    return False
 
 
 def describe_call_target(
