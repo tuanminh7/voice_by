@@ -401,6 +401,20 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  Future<void> leaveFamily() async {
+    await _runBusy(() async {
+      await _apiService.leaveFamily();
+      await loadHomeData();
+    });
+  }
+
+  Future<void> dissolveFamily() async {
+    await _runBusy(() async {
+      await _apiService.dissolveFamily();
+      await loadHomeData();
+    });
+  }
+
   Future<void> inviteFamilyMember(String identifier) async {
     await _runBusy(() async {
       await _apiService.inviteFamilyMember(identifier);
@@ -428,6 +442,16 @@ class AppController extends ChangeNotifier {
         pendingCallToken: _pendingVoiceCallToken,
       );
       _pendingVoiceCallToken = latestVoiceAssistantResult?.pendingCallToken;
+      final createdChatMessage = latestVoiceAssistantResult?.chatMessage;
+      final currentUserId = profile?.id;
+      if (createdChatMessage != null && currentUserId != null) {
+        activeChatPartnerUserId =
+            createdChatMessage.senderUserId == currentUserId
+                ? createdChatMessage.recipientUserId
+                : createdChatMessage.senderUserId;
+        await _refreshChatThreads();
+        await _refreshActiveChatMessages(allowAutoSelect: false);
+      }
       final createdCall = latestVoiceAssistantResult?.call;
       if (createdCall != null) {
         activeCall = createdCall;
@@ -544,6 +568,8 @@ class AppController extends ChangeNotifier {
         question: null,
         call: restartedCall,
         pendingCallToken: null,
+        chatMessage: null,
+        emotionSignal: null,
       );
       _pendingVoiceCallToken = null;
       activeCall = restartedCall;

@@ -400,6 +400,22 @@ class ApiService {
     }
   }
 
+  Future<void> leaveFamily() async {
+    try {
+      await _dio.post<Map<String, dynamic>>('/api/families/current/leave');
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
+  Future<void> dissolveFamily() async {
+    try {
+      await _dio.delete<Map<String, dynamic>>('/api/families/current');
+    } catch (error) {
+      throw _toApiException(error);
+    }
+  }
+
   Future<void> respondToFamilyInvitation({
     required int invitationId,
     required String action,

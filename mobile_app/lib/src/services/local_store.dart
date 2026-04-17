@@ -46,4 +46,9 @@ class LocalStore {
     await _prefs.setString(_pushTokenKey, token);
     await _prefs.setInt(_pushTokenUserIdKey, userId);
   }
+
+  Future<void> clearPushTokenRegistration() async {
+    await _prefs.remove(_pushTokenKey);
+    await _prefs.remove(_pushTokenUserIdKey);
+  }
 }

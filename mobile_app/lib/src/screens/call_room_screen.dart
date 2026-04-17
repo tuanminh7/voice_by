@@ -28,8 +28,8 @@ class _CallRoomScreenState extends State<CallRoomScreen> {
     if (_endingSynced) {
       return;
     }
-    _endingSynced = true;
     await widget.onSyncEndCall();
+    _endingSynced = true;
   }
 
   @override

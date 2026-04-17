@@ -261,6 +261,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             if (_section == HomeMenuSection.family)
               _FamilyView(
+                currentUserId: profile?.id,
                 family: family,
                 invitations: controller.pendingInvitations,
                 relationships: controller.relationships,
@@ -297,6 +298,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               int.tryParse(_priorityOrder.text.trim()) ?? 1,
                         ),
                 onDeleteRelationship: controller.deleteRelationship,
+                onLeaveFamily: controller.leaveFamily,
+                onDissolveFamily: controller.dissolveFamily,
                 onSelectRelationship: (value) {
                   setState(() {
                     _selectedRelationshipKey = value;
@@ -541,6 +544,54 @@ class _VoiceView extends StatelessWidget {
                   assistantResult!.message,
                   style: Theme.of(context).textTheme.bodyLarge,
                 ),
+                if (assistantResult!.emotionSignal != null) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: _emotionSignalColor(
+                        assistantResult!.emotionSignal!.riskLevel,
+                      ).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: _emotionSignalColor(
+                          assistantResult!.emotionSignal!.riskLevel,
+                        ).withValues(alpha: 0.28),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Phân tích cảm xúc: ${_emotionSignalLabel(assistantResult!.emotionSignal!)}',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w700,
+                            color: _emotionSignalColor(
+                              assistantResult!.emotionSignal!.riskLevel,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Điểm hiện tại ${assistantResult!.emotionSignal!.emotionScore}/100.',
+                        ),
+                        if (assistantResult!.emotionSignal!.detectedKeywords.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            'Tín hiệu nhận ra: ${assistantResult!.emotionSignal!.detectedKeywords.join(', ')}.',
+                          ),
+                        ],
+                        const SizedBox(height: 6),
+                        Text(
+                          assistantResult!.emotionSignal!.alertSent
+                              ? 'Hệ thống đã gửi cảnh báo cho quản trị viên gia đình.'
+                              : 'Hệ thống đã ghi nhận trạng thái cảm xúc này để theo dõi tiếp.',
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ] else
                 const Text(
                   'Bác có thể trò chuyện bình thường với Icare. Nếu muốn gọi người thân, hãy nói như "Gọi con trai", sau đó nói "xác nhận". Nếu muốn nhắn hộ, hãy nói như "Nhắn cho con trai là tối nay mẹ nấu cơm rồi nhé".',
@@ -562,10 +613,37 @@ class _VoiceView extends StatelessWidget {
       ],
     );
   }
+
+  String _emotionSignalLabel(EmotionSignal signal) {
+    switch (signal.riskLevel) {
+      case 'critical':
+        return 'Rất buồn, cần quan tâm sớm';
+      case 'warning':
+        return 'Buồn chán, cần chú ý';
+      case 'watch':
+        return 'Tâm trạng giảm nhẹ';
+      default:
+        return 'Ổn định';
+    }
+  }
+
+  Color _emotionSignalColor(String riskLevel) {
+    switch (riskLevel) {
+      case 'critical':
+        return const Color(0xFFB91C1C);
+      case 'warning':
+        return const Color(0xFFD97706);
+      case 'watch':
+        return const Color(0xFFCA8A04);
+      default:
+        return const Color(0xFF15803D);
+    }
+  }
 }
 
 class _FamilyView extends StatelessWidget {
   const _FamilyView({
+    required this.currentUserId,
     required this.family,
     required this.invitations,
     required this.relationships,
@@ -582,10 +660,13 @@ class _FamilyView extends StatelessWidget {
     required this.onRespondInvitation,
     required this.onSaveRelationship,
     required this.onDeleteRelationship,
+    required this.onLeaveFamily,
+    required this.onDissolveFamily,
     required this.onSelectRelationship,
     required this.onSelectRelativeUser,
   });
 
+  final int? currentUserId;
   final FamilyGroup? family;
   final List<FamilyInvitation> invitations;
   final List<FamilyRelationship> relationships;
@@ -605,11 +686,46 @@ class _FamilyView extends StatelessWidget {
   }) onRespondInvitation;
   final VoidCallback? onSaveRelationship;
   final Future<void> Function(int relationshipId) onDeleteRelationship;
+  final Future<void> Function() onLeaveFamily;
+  final Future<void> Function() onDissolveFamily;
   final ValueChanged<String?> onSelectRelationship;
   final ValueChanged<int?> onSelectRelativeUser;
 
+  Future<bool> _confirmAction(
+    BuildContext context, {
+    required String title,
+    required String message,
+    required String confirmLabel,
+  }) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final isAdmin = family?.role == 'admin';
+    final adminCount =
+        family?.members.where((member) => member.role == 'admin').length ?? 0;
+    final memberCount = family?.members.length ?? 0;
+    final isLastAdminWithMembers =
+        isAdmin && adminCount <= 1 && memberCount > 1;
+
     return Column(
       children: [
         _Panel(
@@ -661,6 +777,79 @@ class _FamilyView extends StatelessWidget {
                 ),
         ),
         const SizedBox(height: 20),
+        if (family != null)
+          _Panel(
+            title: 'Hành động nhóm',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (currentUserId != null && isLastAdminWithMembers)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      'Bạn đang là admin cuối cùng. Hãy bổ nhiệm admin khác trước khi rời nhóm, hoặc dùng giải tán nhóm nếu muốn xóa cả nhóm.',
+                    ),
+                  ),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: busy
+                          ? null
+                          : () async {
+                              final confirmed = await _confirmAction(
+                                context,
+                                title: 'Rời nhóm gia đình?',
+                                message:
+                                    'Bạn sẽ không còn thấy chat và thông tin của nhóm này nữa.',
+                                confirmLabel: 'Rời nhóm',
+                              );
+                              if (confirmed) {
+                                await onLeaveFamily();
+                              }
+                            },
+                      icon: const Icon(Icons.logout_rounded),
+                      label: const Text('Rời nhóm'),
+                    ),
+                    if (isAdmin)
+                      FilledButton.icon(
+                        onPressed: busy
+                            ? null
+                            : () async {
+                                final firstConfirm = await _confirmAction(
+                                  context,
+                                  title: 'Giải tán nhóm?',
+                                  message:
+                                      'Thao tác này sẽ xóa nhóm, lời mời và chat gia đình liên quan.',
+                                  confirmLabel: 'Tiếp tục',
+                                );
+                                if (!firstConfirm) {
+                                  return;
+                                }
+                                if (!context.mounted) {
+                                  return;
+                                }
+                                final secondConfirm = await _confirmAction(
+                                  context,
+                                  title: 'Xác nhận lần cuối',
+                                  message:
+                                      'Bạn chắc chắn muốn giải tán nhóm "${family!.familyName}"?',
+                                  confirmLabel: 'Giải tán',
+                                );
+                                if (secondConfirm) {
+                                  await onDissolveFamily();
+                                }
+                              },
+                        icon: const Icon(Icons.delete_forever_rounded),
+                        label: const Text('Giải tán nhóm'),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        if (family != null) const SizedBox(height: 20),
         if (family?.role == 'admin')
           _Panel(
             title: 'Mời thành viên',
@@ -1268,12 +1457,14 @@ class _ActiveCallPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final userId = currentUserId;
     final session = activeCall;
-    final canAccept =
-        hasRealtimeCallConfig && userId != null && session?.canAccept(userId) == true;
+    final canAccept = hasRealtimeCallConfig &&
+        userId != null &&
+        session?.canAccept(userId) == true;
     final canDecline = userId != null && session?.canDecline(userId) == true;
     final canEnd = userId != null && session?.canEnd(userId) == true;
-    final canRedial =
-        hasRealtimeCallConfig && userId != null && session?.canRedial(userId) == true;
+    final canRedial = hasRealtimeCallConfig &&
+        userId != null &&
+        session?.canRedial(userId) == true;
 
     return _Panel(
       title: 'Cuộc gọi hiện tại',

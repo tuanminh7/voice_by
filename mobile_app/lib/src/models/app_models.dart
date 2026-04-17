@@ -233,6 +233,8 @@ class VoiceAssistantResult {
     required this.question,
     required this.call,
     required this.pendingCallToken,
+    required this.chatMessage,
+    required this.emotionSignal,
   });
 
   final String action;
@@ -240,6 +242,8 @@ class VoiceAssistantResult {
   final String? question;
   final CallSession? call;
   final String? pendingCallToken;
+  final FamilyChatMessage? chatMessage;
+  final EmotionSignal? emotionSignal;
 
   bool get isCalling => action == 'calling' && call != null;
   bool get isConfirmationRequired => action == 'confirm';
@@ -257,6 +261,46 @@ class VoiceAssistantResult {
           ? CallSession.fromJson(json['call'] as Map<String, dynamic>)
           : null,
       pendingCallToken: json['pending_call_token'] as String?,
+      chatMessage: json['chat_message'] is Map<String, dynamic>
+          ? FamilyChatMessage.fromJson(
+              json['chat_message'] as Map<String, dynamic>,
+            )
+          : null,
+      emotionSignal: json['emotion_signal'] is Map<String, dynamic>
+          ? EmotionSignal.fromJson(json['emotion_signal'] as Map<String, dynamic>)
+          : null,
+    );
+  }
+}
+
+class EmotionSignal {
+  const EmotionSignal({
+    required this.emotionLabel,
+    required this.emotionScore,
+    required this.riskLevel,
+    required this.detectedKeywords,
+    required this.alertSent,
+    required this.createdAt,
+  });
+
+  final String emotionLabel;
+  final int emotionScore;
+  final String riskLevel;
+  final List<String> detectedKeywords;
+  final bool alertSent;
+  final String? createdAt;
+
+  factory EmotionSignal.fromJson(Map<String, dynamic> json) {
+    return EmotionSignal(
+      emotionLabel: json['emotion_label'] as String? ?? '',
+      emotionScore: json['emotion_score'] as int? ?? 100,
+      riskLevel: json['risk_level'] as String? ?? 'stable',
+      detectedKeywords:
+          (json['detected_keywords'] as List<dynamic>? ?? const [])
+              .map((item) => '$item')
+              .toList(),
+      alertSent: json['alert_sent'] as bool? ?? false,
+      createdAt: json['created_at'] as String?,
     );
   }
 }

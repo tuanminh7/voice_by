@@ -22,7 +22,7 @@ class ZegoCallService {
       return AppConfig.realtimeCallSetupHint;
     }
     if (session == null || session.roomId.trim().isEmpty) {
-      return 'Cuộc gọi này chưa có mã phòng thoại hợp lệ nên chưa thể kết nối.';
+      return 'Cuoc goi nay chua co ma phong hop le nen chua the ket noi.';
     }
     return null;
   }
@@ -99,12 +99,13 @@ class ZegoCallService {
 
     final navigatorState = AppNavigator.navigatorKey.currentState;
     if (navigatorState == null) {
-      return 'Ứng dụng chưa sẵn sàng mở màn hình cuộc gọi. Bạn thử lại sau vài giây nhé.';
+      return 'Ung dung chua san sang mo man hinh cuoc goi. Ban thu lai sau vai giay nhe.';
     }
 
     _activeCallSessionId = session.callSessionId;
 
-    await navigatorState.push(
+    navigatorState
+        .push(
       MaterialPageRoute<void>(
         builder: (_) => CallRoomScreen(
           user: user,
@@ -112,11 +113,12 @@ class ZegoCallService {
           onSyncEndCall: onSyncEndCall,
         ),
       ),
-    );
-
-    if (_activeCallSessionId == session.callSessionId) {
-      _activeCallSessionId = null;
-    }
+    )
+        .then((_) {
+      if (_activeCallSessionId == session.callSessionId) {
+        _activeCallSessionId = null;
+      }
+    });
     return null;
   }
 

@@ -80,7 +80,7 @@ GEMINI_API_KEY_POOL = tuple(
 GEMINI_GENERATION_CONFIG = {
     "temperature": 0.35,
     "candidate_count": 1,
-    "max_output_tokens": 384,
+    "max_output_tokens": 768,
 }
 GEMINI_KEY_CURSOR = 0
 GEMINI_KEY_CURSOR_LOCK = threading.Lock()
@@ -1278,6 +1278,49 @@ def remove_family_member(member_id: int):
     return jsonify({"message": message, "family": build_family_payload(g.current_user["id"])})
 
 
+@app.route("/api/families/current/leave", methods=["POST"])
+@pin_required
+def leave_current_family():
+    membership = get_active_family_membership(g.current_user["id"])
+    if not membership:
+        return json_error("Bạn chưa thuộc nhóm gia đình nào.", 404, "family_not_found")
+
+    family_group_id = membership["family_group_id"]
+    active_member_count = count_active_family_members(family_group_id)
+    if active_member_count <= 1:
+        get_db().execute("DELETE FROM family_groups WHERE id = ?", (family_group_id,))
+        get_db().commit()
+        return jsonify({"message": "Bạn đã rời và xóa nhóm gia đình cuối cùng.", "family": None})
+
+    if membership["role"] == "admin" and count_active_admins(family_group_id) <= 1:
+        return json_error(
+            "Bạn là admin cuối cùng. Hãy bổ nhiệm admin khác trước khi rời nhóm, hoặc giải tán nhóm.",
+            400,
+            "last_admin",
+        )
+
+    get_db().execute(
+        "UPDATE family_members SET status = 'removed', updated_at = ? WHERE id = ?",
+        (utcnow_iso(), membership["membership_id"]),
+    )
+    get_db().commit()
+    return jsonify({"message": "Bạn đã rời nhóm gia đình.", "family": None})
+
+
+@app.route("/api/families/current", methods=["DELETE"])
+@pin_required
+def dissolve_current_family():
+    membership = get_active_family_membership(g.current_user["id"])
+    if not membership:
+        return json_error("Bạn chưa thuộc nhóm gia đình nào.", 404, "family_not_found")
+    if membership["role"] != "admin":
+        return json_error("Chỉ admin mới được giải tán nhóm gia đình.", 403, "not_family_admin")
+
+    get_db().execute("DELETE FROM family_groups WHERE id = ?", (membership["family_group_id"],))
+    get_db().commit()
+    return jsonify({"message": "Đã giải tán nhóm gia đình.", "family": None})
+
+
 @app.route("/api/device-push-tokens/register", methods=["POST"])
 @pin_required
 def register_device_push_token():
@@ -1531,6 +1574,35 @@ def clear_pending_voice_call_intent() -> None:
     session.modified = True
 
 
+def get_pending_voice_family_chat_intent() -> dict | None:
+    payload = session.get(PENDING_VOICE_FAMILY_CHAT_SESSION_KEY)
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def clear_pending_voice_family_chat_intent() -> None:
+    session.pop(PENDING_VOICE_FAMILY_CHAT_SESSION_KEY, None)
+    session.modified = True
+
+
+def save_pending_voice_family_chat_intent(
+    *,
+    awaiting_field: str,
+    recipient_user_id: int | None = None,
+    target_label: str = "",
+    message_text: str = "",
+) -> None:
+    session[PENDING_VOICE_FAMILY_CHAT_SESSION_KEY] = {
+        "awaiting_field": awaiting_field,
+        "recipient_user_id": recipient_user_id,
+        "target_label": target_label,
+        "message_text": message_text,
+        "created_at": utcnow_iso(),
+    }
+    session.modified = True
+
+
 def save_pending_voice_call_intent(
     *,
     relationship_key: str,
@@ -1665,9 +1737,17 @@ def classify_voice_request(
     pending_intent: dict | None,
     *,
     owner_user_id: int,
+    pending_family_chat_intent: dict | None = None,
 ) -> dict:
-    family_chat_intent = detect_family_chat_intent(text, owner_user_id)
     call_intent = detect_call_intent(text, relationship_rows)
+    if pending_family_chat_intent and call_intent.get("type") != "call":
+        family_chat_intent = continue_pending_voice_family_chat_intent(
+            text,
+            owner_user_id,
+            pending_family_chat_intent,
+        )
+    else:
+        family_chat_intent = detect_family_chat_intent(text, owner_user_id)
     request_type = "general_chat"
     request_subtype = None
 
@@ -1677,14 +1757,14 @@ def classify_voice_request(
     elif is_current_time_question(text) or is_current_date_question(text):
         request_type = "realtime_info"
         request_subtype = "time"
+    elif call_intent.get("type") == "call":
+        request_type = "call_start"
     elif family_chat_intent.get("type") == "family_chat":
         request_type = "family_chat"
     elif pending_intent and is_voice_confirmation_reply(text):
         request_type = "call_confirm"
     elif pending_intent and is_voice_cancel_reply(text):
         request_type = "call_cancel"
-    elif call_intent.get("type") == "call":
-        request_type = "call_start"
     elif not pending_intent and is_voice_confirmation_reply(text):
         request_type = "orphan_confirmation"
     elif not pending_intent and is_voice_cancel_reply(text):
@@ -1700,6 +1780,13 @@ def classify_voice_request(
             "family_chat",
             "call_start",
             "general_chat",
+        },
+        "release_pending_family_chat": bool(pending_family_chat_intent) and request_type in {
+            "realtime_info",
+            "call_start",
+            "general_chat",
+            "orphan_confirmation",
+            "orphan_cancel",
         },
     }
 
@@ -1748,6 +1835,7 @@ def create_call_from_voice_intent():
 
     relationship_rows = list_call_relationship_rows(g.current_user["id"])
     pending_intent = get_pending_voice_call_intent()
+    pending_family_chat_intent = get_pending_voice_family_chat_intent()
     pending_intent_from_token = False
     if not pending_intent and raw_pending_call_token:
         pending_intent = load_pending_voice_call_token(
@@ -1761,6 +1849,7 @@ def create_call_from_voice_intent():
         relationship_rows,
         pending_intent,
         owner_user_id=g.current_user["id"],
+        pending_family_chat_intent=pending_family_chat_intent,
     )
     family_chat_intent = voice_request["family_chat_intent"]
     intent = voice_request["call_intent"]
@@ -1770,6 +1859,7 @@ def create_call_from_voice_intent():
         realtime_call_ready=realtime_call_ready,
         pending_intent_present=bool(pending_intent),
         pending_intent_from_token=pending_intent_from_token,
+        pending_family_chat_intent_present=bool(pending_family_chat_intent),
         pending_call_token_present=bool(raw_pending_call_token),
         voice_request_type=voice_request.get("type"),
         voice_request_subtype=voice_request.get("subtype"),
@@ -1782,8 +1872,28 @@ def create_call_from_voice_intent():
         clear_pending_voice_call_intent()
         pending_intent = None
 
+    if pending_family_chat_intent and voice_request.get("release_pending_family_chat"):
+        clear_pending_voice_family_chat_intent()
+        pending_family_chat_intent = None
+
     if voice_request.get("type") == "family_chat":
+        if family_chat_intent.get("cancelled"):
+            clear_pending_voice_family_chat_intent()
+            return voice_json_response(
+                "chat",
+                family_chat_intent.get("message")
+                or "Đã hủy chuyển lời. Mình quay lại trò chuyện bình thường nhé.",
+            )
+
         if family_chat_intent.get("needs_confirmation"):
+            awaiting_field = (family_chat_intent.get("awaiting_field") or "").strip()
+            if awaiting_field in {"recipient", "message"}:
+                save_pending_voice_family_chat_intent(
+                    awaiting_field=awaiting_field,
+                    recipient_user_id=family_chat_intent.get("recipient_user_id"),
+                    target_label=family_chat_intent.get("target_label") or "",
+                    message_text=family_chat_intent.get("message_text") or "",
+                )
             return voice_json_response(
                 "chat",
                 family_chat_intent.get("question")
@@ -1795,6 +1905,7 @@ def create_call_from_voice_intent():
             family_chat_intent["recipient_user_id"],
             family_chat_intent["message_text"],
         )
+        clear_pending_voice_family_chat_intent()
         if not message_payload:
             return json_error("Không thể nhắn tin cho người này trong gia đình.", 404, "chat_partner_not_found")
 
@@ -2810,6 +2921,9 @@ Nguyên tắc trả lời:
 - Tuyệt đối không gọi người dùng là "bà", "bác" hoặc "cháu" nếu vai trò đang lưu không phải như vậy.
 - Nếu người dùng hỏi thông tin thay đổi theo thời gian như giờ hiện tại, ngày hiện tại, thời tiết hoặc nhiệt độ, hãy ưu tiên dùng Live context.
 - Khi cần trả lời chi tiết, hãy chia ý rõ ràng và đi thẳng vào câu hỏi.
+- Với câu hỏi tâm sự, xin lời khuyên, kể chuyện hoặc hỏi mở, hãy trả lời từ 3 đến 5 câu và đưa ra ít nhất 2 ý cụ thể, dễ làm.
+- Tránh chỉ trả lời đúng 1 câu quá cụt nếu người dùng đang cần giải thích, hướng dẫn hoặc được an ủi.
+- Khi phù hợp, hãy nêu ngắn gọn: người dùng đang gặp gì, nên làm gì ngay, và bước tiếp theo nên thử.
 
 Live context:
 {live_context}
@@ -2825,6 +2939,96 @@ Người dùng:
 
 Trả lời:
 """.strip()
+
+
+def should_expand_assistant_reply(question: str, reply: str) -> bool:
+    if not question.strip() or not reply.strip():
+        return False
+    if is_current_time_question(question) or is_current_date_question(question) or is_weather_question(question):
+        return False
+
+    question_word_count = len(re.findall(r"\w+", question, flags=re.UNICODE))
+    reply_word_count = len(re.findall(r"\w+", reply, flags=re.UNICODE))
+    sentence_count = sum(reply.count(marker) for marker in ".!?")
+    simplified_question = simplify_text(question)
+    open_question_markers = (
+        "tai sao",
+        "the nao",
+        "lam sao",
+        "giup",
+        "tu van",
+        "khuyen",
+        "co nen",
+        "co sao khong",
+        "cam thay",
+        "co don",
+        "buon",
+        "met",
+        "chan",
+        "lo",
+    )
+
+    if any(marker in simplified_question for marker in open_question_markers):
+        return reply_word_count < 60 or sentence_count < 3
+
+    if question_word_count >= 7:
+        return reply_word_count < 40 or sentence_count < 2
+
+    return len(reply.strip()) < 110 and sentence_count < 2
+
+
+def expand_assistant_reply(
+    question: str,
+    history: list[str],
+    draft_reply: str,
+    current_model,
+) -> str | None:
+    if current_model is None:
+        return None
+
+    user_title = get_user_voice_title(g.current_user)
+    assistant_self = get_assistant_self_reference(g.current_user)
+    history_text = "\n".join(history[-4:]) or "Chưa có lịch sử hội thoại."
+    context = search_context(question) or knowledge or "Không có dữ liệu tham khảo bổ sung."
+    live_context = build_live_context(question)
+    prompt = f"""
+Bạn đang viết lại câu trả lời cho trợ lý gia đình.
+
+Mục tiêu:
+- Giữ đúng ý chính của câu trả lời nháp.
+- Viết lại bằng tiếng Việt tự nhiên, rõ ràng, cụ thể, 3 đến 5 câu.
+- Nếu người dùng đang tâm sự, buồn, lo, cô đơn hoặc mệt, hãy mở đầu bằng 1 câu đồng cảm ngắn.
+- Ưu tiên nêu 2 đến 4 gợi ý thực tế, dễ làm ngay.
+- Không thêm thông tin bịa ra ngoài ngữ cảnh đã có.
+- Xưng hô với người dùng là "{user_title.lower()}". Nếu cần tự xưng, hãy dùng "{assistant_self}".
+
+Live context:
+{live_context}
+
+Lịch sử hội thoại gần đây:
+{history_text}
+
+Thông tin tham khảo:
+{context}
+
+Câu hỏi của người dùng:
+{question}
+
+Câu trả lời nháp:
+{draft_reply}
+
+Câu trả lời viết lại:
+""".strip()
+
+    try:
+        response = current_model.generate_content(prompt)
+    except Exception:
+        return None
+
+    rewritten_reply = (getattr(response, "text", "") or "").strip()
+    if len(rewritten_reply) <= len(draft_reply):
+        return None
+    return rewritten_reply
 
 
 def get_chat_history_key() -> str:
@@ -2917,6 +3121,15 @@ def generate_reply(question: str, history: list[str]) -> str:
             response = current_model.generate_content(prompt)
             reply = (getattr(response, "text", "") or "").strip()
             if reply:
+                if should_expand_assistant_reply(question, reply):
+                    expanded_reply = expand_assistant_reply(
+                        question,
+                        history,
+                        reply,
+                        current_model,
+                    )
+                    if expanded_reply:
+                        reply = expanded_reply
                 log_mobile_diag(
                     "assistant_reply_generated",
                     source="gemini",
@@ -3270,6 +3483,18 @@ def count_active_admins(family_group_id: int) -> int:
     return row["total"] if row else 0
 
 
+def count_active_family_members(family_group_id: int) -> int:
+    row = fetch_one(
+        """
+        SELECT COUNT(*) AS total
+        FROM family_members
+        WHERE family_group_id = ? AND status = 'active'
+        """,
+        (family_group_id,),
+    )
+    return row["total"] if row else 0
+
+
 def fetch_family_members(family_group_id: int) -> list[dict]:
     rows = fetch_all(
         """
@@ -3496,6 +3721,7 @@ RELATIONSHIP_ALIASES = {
 FINAL_CALL_STATUSES = {"accepted", "declined", "timeout", "missed", "ended", "failed"}
 FINAL_CALL_TARGET_STATUSES = {"accepted", "declined", "timeout", "skipped", "missed"}
 PENDING_VOICE_CALL_SESSION_KEY = "pending_voice_call_intent"
+PENDING_VOICE_FAMILY_CHAT_SESSION_KEY = "pending_voice_family_chat_intent"
 
 
 def simplify_text(value: str) -> str:
@@ -3552,6 +3778,8 @@ def extract_voice_message_command(text: str) -> dict | None:
     command_prefix = None
     for prefix in (
         "gửi tin nhắn cho ",
+        "chuyển lời cho ",
+        "chuyen loi cho ",
         "gui tin nhan cho ",
         "gửi lời nhắn cho ",
         "gui loi nhan cho ",
@@ -3644,6 +3872,7 @@ def extract_voice_message_command_without_separator(text: str, owner_user_id: in
 
     command_detected = False
     for prefix_tokens in (
+        ["chuyen", "loi", "cho"],
         ["gui", "tin", "nhan", "cho"],
         ["gui", "loi", "nhan", "cho"],
         ["nhan", "cho"],
@@ -3718,6 +3947,102 @@ def clean_voice_target_hint(value: str) -> str:
     simplified = simplify_text(value)
     simplified = re.sub(r"\b(cua toi|toi|oi|nhe|nha|dum|dum nhe|giup toi)\b", " ", simplified)
     return re.sub(r"\s+", " ", simplified).strip()
+
+
+def is_voice_message_starter(text: str) -> bool:
+    simplified = simplify_text(text)
+    starter_patterns = (
+        "chuyen loi",
+        "gui loi nhan",
+        "gui tin nhan",
+        "nhan giup",
+        "noi giup",
+        "bao giup",
+        "toi muon chuyen loi",
+        "toi muon gui loi nhan",
+    )
+    return any(pattern in simplified for pattern in starter_patterns)
+
+
+def extract_voice_message_target_only_command(text: str) -> str | None:
+    normalized_text = " ".join((text or "").strip().split())
+    if not normalized_text:
+        return None
+
+    remaining_text = normalized_text
+    lowered_remaining = remaining_text.lower()
+
+    for prefix in (
+        "bạn ",
+        "ban ",
+        "icare ",
+        "bot ",
+        "trợ lý ",
+        "tro ly ",
+        "hãy ",
+        "hay ",
+        "giúp ",
+        "giup ",
+        "vui lòng ",
+        "vui long ",
+        "tôi muốn ",
+        "toi muon ",
+    ):
+        if lowered_remaining.startswith(prefix):
+            remaining_text = remaining_text[len(prefix):].lstrip()
+            lowered_remaining = remaining_text.lower()
+
+    matched_prefix = False
+    for prefix in (
+        "chuyển lời cho ",
+        "chuyen loi cho ",
+        "gửi tin nhắn cho ",
+        "gui tin nhan cho ",
+        "gửi lời nhắn cho ",
+        "gui loi nhan cho ",
+        "nhắn cho ",
+        "nhan cho ",
+        "cho ",
+        "bảo ",
+        "bao ",
+        "nói với ",
+        "noi voi ",
+        "nhắc ",
+        "nhac ",
+    ):
+        if lowered_remaining.startswith(prefix):
+            remaining_text = remaining_text[len(prefix):].strip()
+            matched_prefix = True
+            break
+
+    if not matched_prefix and is_voice_message_starter(normalized_text):
+        return None
+
+    remaining_text = remaining_text.strip(" ,:;.!?-")
+    return remaining_text or None
+
+
+def extract_voice_message_followup_text(text: str) -> str | None:
+    normalized_text = " ".join((text or "").strip().split())
+    if not normalized_text:
+        return None
+
+    remaining_text = normalized_text
+    lowered_remaining = remaining_text.lower()
+    for prefix in (
+        "nội dung là ",
+        "noi dung la ",
+        "là ",
+        "la ",
+        "rằng ",
+        "rang ",
+    ):
+        if lowered_remaining.startswith(prefix):
+            remaining_text = remaining_text[len(prefix):].strip()
+            break
+
+    remaining_text = remaining_text.strip().strip("\"'")
+    return remaining_text or None
 
 
 def list_voice_message_target_candidates(owner_user_id: int) -> list[dict]:
@@ -3906,31 +4231,175 @@ def resolve_voice_message_target(owner_user_id: int, target_hint: str) -> dict:
     }
 
 
+def continue_pending_voice_family_chat_intent(
+    text: str,
+    owner_user_id: int,
+    pending_intent: dict,
+) -> dict:
+    if is_voice_cancel_reply(text):
+        return {
+            "type": "family_chat",
+            "cancelled": True,
+            "message": "Đã hủy chuyển lời. Mình quay lại trò chuyện bình thường nhé.",
+        }
+
+    awaiting_field = (pending_intent.get("awaiting_field") or "").strip()
+    if awaiting_field == "recipient":
+        command = extract_voice_message_command(text)
+        if command is None:
+            command = extract_voice_message_command_without_separator(text, owner_user_id)
+        if command is not None:
+            target_resolution = resolve_voice_message_target(owner_user_id, command["target_hint"])
+            if target_resolution["status"] != "resolved":
+                return {
+                    "type": "family_chat",
+                    "needs_confirmation": True,
+                    "awaiting_field": "recipient",
+                    "question": target_resolution["question"],
+                }
+
+            candidate = target_resolution["candidate"]
+            return {
+                "type": "family_chat",
+                "needs_confirmation": False,
+                "recipient_user_id": candidate["user_id"],
+                "recipient_full_name": candidate["full_name"],
+                "target_label": target_resolution["target_label"],
+                "message_text": command["message_text"],
+            }
+
+        target_hint = extract_voice_message_target_only_command(text)
+        if not target_hint:
+            return {
+                "type": "family_chat",
+                "needs_confirmation": True,
+                "awaiting_field": "recipient",
+                "question": "Bạn muốn chuyển lời cho ai trong gia đình?",
+            }
+
+        target_resolution = resolve_voice_message_target(owner_user_id, target_hint)
+        if target_resolution["status"] != "resolved":
+            return {
+                "type": "family_chat",
+                "needs_confirmation": True,
+                "awaiting_field": "recipient",
+                "question": target_resolution["question"],
+            }
+
+        candidate = target_resolution["candidate"]
+        pending_message_text = (pending_intent.get("message_text") or "").strip()
+        if pending_message_text:
+            return {
+                "type": "family_chat",
+                "needs_confirmation": False,
+                "recipient_user_id": candidate["user_id"],
+                "recipient_full_name": candidate["full_name"],
+                "target_label": target_resolution["target_label"],
+                "message_text": pending_message_text,
+            }
+
+        return {
+            "type": "family_chat",
+            "needs_confirmation": True,
+            "awaiting_field": "message",
+            "recipient_user_id": candidate["user_id"],
+            "recipient_full_name": candidate["full_name"],
+            "target_label": target_resolution["target_label"],
+            "question": f"Bạn muốn chuyển lời gì cho {target_resolution['target_label']}?",
+        }
+
+    if awaiting_field == "message":
+        recipient_user_id = pending_intent.get("recipient_user_id")
+        try:
+            recipient_user_id = int(recipient_user_id)
+        except (TypeError, ValueError):
+            recipient_user_id = None
+        if not recipient_user_id:
+            return {
+                "type": "family_chat",
+                "needs_confirmation": True,
+                "awaiting_field": "recipient",
+                "question": "Bạn muốn chuyển lời cho ai trong gia đình?",
+            }
+
+        message_text = extract_voice_message_followup_text(text)
+        if not message_text:
+            return {
+                "type": "family_chat",
+                "needs_confirmation": True,
+                "awaiting_field": "message",
+                "recipient_user_id": recipient_user_id,
+                "target_label": pending_intent.get("target_label") or "người thân",
+                "question": f"Bạn nói lại nội dung muốn chuyển cho {pending_intent.get('target_label') or 'người thân'} giúp mình nhé.",
+            }
+
+        return {
+            "type": "family_chat",
+            "needs_confirmation": False,
+            "recipient_user_id": recipient_user_id,
+            "target_label": pending_intent.get("target_label") or "người thân",
+            "message_text": message_text,
+        }
+
+    return {"type": "chat"}
+
+
 def detect_family_chat_intent(text: str, owner_user_id: int) -> dict:
     command = extract_voice_message_command(text)
     if command is None:
         command = extract_voice_message_command_without_separator(text, owner_user_id)
-    if command is None:
-        return {"type": "chat"}
+    if command is not None:
+        target_resolution = resolve_voice_message_target(owner_user_id, command["target_hint"])
+        if target_resolution["status"] != "resolved":
+            return {
+                "type": "family_chat",
+                "needs_confirmation": True,
+                "awaiting_field": "recipient",
+                "question": target_resolution["question"],
+                "message_text": command["message_text"],
+            }
 
-    target_resolution = resolve_voice_message_target(owner_user_id, command["target_hint"])
-    if target_resolution["status"] != "resolved":
+        candidate = target_resolution["candidate"]
         return {
             "type": "family_chat",
-            "needs_confirmation": True,
-            "question": target_resolution["question"],
+            "needs_confirmation": False,
+            "recipient_user_id": candidate["user_id"],
+            "recipient_full_name": candidate["full_name"],
+            "target_label": target_resolution["target_label"],
             "message_text": command["message_text"],
         }
 
-    candidate = target_resolution["candidate"]
-    return {
-        "type": "family_chat",
-        "needs_confirmation": False,
-        "recipient_user_id": candidate["user_id"],
-        "recipient_full_name": candidate["full_name"],
-        "target_label": target_resolution["target_label"],
-        "message_text": command["message_text"],
-    }
+    if is_voice_message_starter(text):
+        target_hint = extract_voice_message_target_only_command(text)
+        if target_hint:
+            target_resolution = resolve_voice_message_target(owner_user_id, target_hint)
+            if target_resolution["status"] != "resolved":
+                return {
+                    "type": "family_chat",
+                    "needs_confirmation": True,
+                    "awaiting_field": "recipient",
+                    "question": target_resolution["question"],
+                }
+
+            candidate = target_resolution["candidate"]
+            return {
+                "type": "family_chat",
+                "needs_confirmation": True,
+                "awaiting_field": "message",
+                "recipient_user_id": candidate["user_id"],
+                "recipient_full_name": candidate["full_name"],
+                "target_label": target_resolution["target_label"],
+                "question": f"Bạn muốn chuyển lời gì cho {target_resolution['target_label']}?",
+            }
+
+        return {
+            "type": "family_chat",
+            "needs_confirmation": True,
+            "awaiting_field": "recipient",
+            "question": "Bạn muốn chuyển lời cho ai trong gia đình?",
+        }
+
+    return {"type": "chat"}
 
 
 def get_user_care_role_key(user_row: sqlite3.Row | None) -> str | None:
@@ -4052,23 +4521,23 @@ def fetch_monitored_elders(family_group_id: int) -> list[sqlite3.Row]:
             u.email,
             u.phone_number,
             CASE
-                WHEN EXISTS(
+                WHEN u.care_role_key = 'grandfather' OR EXISTS(
                     SELECT 1
                     FROM family_relationships fr
                     WHERE fr.family_group_id = fm.family_group_id
                       AND fr.relative_user_id = fm.user_id
                       AND fr.is_active = 1
                       AND fr.relationship_key = 'grandfather'
-                ) THEN 'ong'
-                WHEN EXISTS(
+                ) THEN 'grandfather'
+                WHEN u.care_role_key = 'grandmother' OR EXISTS(
                     SELECT 1
                     FROM family_relationships fr
                     WHERE fr.family_group_id = fm.family_group_id
                       AND fr.relative_user_id = fm.user_id
                       AND fr.is_active = 1
                       AND fr.relationship_key = 'grandmother'
-                ) THEN 'ba'
-                ELSE 'nguoi_cao_tuoi'
+                ) THEN 'grandmother'
+                ELSE 'elder'
             END AS care_role_key
         FROM family_members fm
         JOIN users u ON u.id = fm.user_id
@@ -4076,6 +4545,7 @@ def fetch_monitored_elders(family_group_id: int) -> list[sqlite3.Row]:
           AND fm.status = 'active'
           AND (
               u.age >= ?
+              OR u.care_role_key IN ('grandfather', 'grandmother')
               OR EXISTS(
                     SELECT 1
                     FROM family_relationships fr
@@ -4097,11 +4567,11 @@ def is_monitored_elder(user_id: int, family_group_id: int) -> bool:
 
 def emotion_role_label(care_role_key: str) -> str:
     return {
-        "grandfather": "Ong",
-        "grandmother": "Ba",
+        "grandfather": "Ông",
+        "grandmother": "Bà",
         "father": "Ba",
-        "mother": "Me",
-        "elder": "Nguoi cao tuoi",
+        "mother": "Mẹ",
+        "elder": "Người cao tuổi",
     }.get(care_role_key, "Người được theo dõi")
 
 
