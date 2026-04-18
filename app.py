@@ -2924,6 +2924,7 @@ Nguyên tắc trả lời:
 - Với câu hỏi tâm sự, xin lời khuyên, kể chuyện hoặc hỏi mở, hãy trả lời từ 3 đến 5 câu và đưa ra ít nhất 2 ý cụ thể, dễ làm.
 - Tránh chỉ trả lời đúng 1 câu quá cụt nếu người dùng đang cần giải thích, hướng dẫn hoặc được an ủi.
 - Khi phù hợp, hãy nêu ngắn gọn: người dùng đang gặp gì, nên làm gì ngay, và bước tiếp theo nên thử.
+- Nếu người dùng yêu cầu kể chuyện/câu chuyện vui, hãy kể trọn một mẩu chuyện ngắn có mở đầu, tình huống vui và câu kết; không chỉ giới thiệu rằng sắp kể.
 
 Live context:
 {live_context}
@@ -2977,6 +2978,29 @@ def should_expand_assistant_reply(question: str, reply: str) -> bool:
     return len(reply.strip()) < 110 and sentence_count < 2
 
 
+def is_complete_assistant_reply(reply: str) -> bool:
+    normalized_reply = (reply or "").strip()
+    if not normalized_reply:
+        return False
+
+    if normalized_reply.endswith(("...", "…", ",", ";", ":", "-", "–")):
+        return False
+
+    last_char = normalized_reply[-1]
+    if last_char not in ".!?\"')]}":
+        word_count = len(re.findall(r"\w+", normalized_reply, flags=re.UNICODE))
+        if word_count < 12:
+            return False
+
+    last_word_match = re.search(r"([\wÀ-ỹ]+)\s*$", normalized_reply, flags=re.UNICODE)
+    if last_word_match:
+        last_word = simplify_text(last_word_match.group(1))
+        if len(last_word) <= 2:
+            return False
+
+    return True
+
+
 def expand_assistant_reply(
     question: str,
     history: list[str],
@@ -2999,6 +3023,7 @@ Mục tiêu:
 - Viết lại bằng tiếng Việt tự nhiên, rõ ràng, cụ thể, 3 đến 5 câu.
 - Nếu người dùng đang tâm sự, buồn, lo, cô đơn hoặc mệt, hãy mở đầu bằng 1 câu đồng cảm ngắn.
 - Ưu tiên nêu 2 đến 4 gợi ý thực tế, dễ làm ngay.
+- Nếu người dùng yêu cầu kể chuyện/câu chuyện vui, hãy kể trọn một mẩu chuyện ngắn trong 4 đến 6 câu.
 - Không thêm thông tin bịa ra ngoài ngữ cảnh đã có.
 - Xưng hô với người dùng là "{user_title.lower()}". Nếu cần tự xưng, hãy dùng "{assistant_self}".
 
@@ -3027,6 +3052,8 @@ Câu trả lời viết lại:
 
     rewritten_reply = (getattr(response, "text", "") or "").strip()
     if len(rewritten_reply) <= len(draft_reply):
+        return None
+    if not is_complete_assistant_reply(rewritten_reply):
         return None
     return rewritten_reply
 
@@ -3130,6 +3157,10 @@ def generate_reply(question: str, history: list[str]) -> str:
                     )
                     if expanded_reply:
                         reply = expanded_reply
+                if not is_complete_assistant_reply(reply):
+                    reply = reply.rstrip(" ,;:-–…")
+                    if reply and reply[-1] not in ".!?":
+                        reply += "."
                 log_mobile_diag(
                     "assistant_reply_generated",
                     source="gemini",
