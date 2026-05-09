@@ -5,6 +5,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 import unicodedata
 import uuid
 from collections import defaultdict
@@ -84,6 +85,10 @@ GEMINI_GENERATION_CONFIG = {
 }
 GEMINI_KEY_CURSOR = 0
 GEMINI_KEY_CURSOR_LOCK = threading.Lock()
+USER_PAYLOAD_CACHE_TTL_SECONDS = float(os.getenv("USER_PAYLOAD_CACHE_TTL_SECONDS", "2"))
+USER_PAYLOAD_CACHE: dict[str, dict] = {}
+USER_PAYLOAD_CACHE_LOCK = threading.Lock()
+HOT_API_LOG_THRESHOLD_MS = int(os.getenv("HOT_API_LOG_THRESHOLD_MS", "250"))
 LIVE_WEATHER_CACHE_TTL_SECONDS = int(os.getenv("LIVE_WEATHER_CACHE_TTL_SECONDS", "300"))
 LIVE_WEATHER_CACHE: dict[str, dict] = {}
 WEATHER_GEOCODE_CACHE_TTL_SECONDS = int(os.getenv("WEATHER_GEOCODE_CACHE_TTL_SECONDS", "86400"))
@@ -349,6 +354,11 @@ def build_gemini_diag_context(user_row: sqlite3.Row | None) -> dict:
 
 
 @app.before_request
+def capture_request_started_at() -> None:
+    g.request_started_at = time.perf_counter()
+
+
+@app.before_request
 def log_native_client_request() -> None:
     client_source = (request.headers.get("X-Client-Source", "") or "").strip()
     if not client_source or not request.path.startswith("/api/"):
@@ -367,6 +377,15 @@ def log_native_client_request() -> None:
 def log_mobile_api_errors(response):
     client_source = (request.headers.get("X-Client-Source", "") or "").strip()
     if not client_source or not request.path.startswith("/api/") or response.status_code < 400:
+        started_at = getattr(g, "request_started_at", None)
+        if started_at is not None:
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            if duration_ms >= HOT_API_LOG_THRESHOLD_MS:
+                log_mobile_diag(
+                    "api_response_timing",
+                    duration_ms=duration_ms,
+                    status_code=response.status_code,
+                )
         return response
 
     payload = response.get_json(silent=True) or {}
@@ -377,6 +396,15 @@ def log_mobile_api_errors(response):
         error=payload.get("error"),
         error_code=payload.get("code"),
     )
+    started_at = getattr(g, "request_started_at", None)
+    if started_at is not None:
+        duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        log_mobile_diag(
+            "api_response_timing",
+            level="warning" if duration_ms >= HOT_API_LOG_THRESHOLD_MS else "info",
+            duration_ms=duration_ms,
+            status_code=response.status_code,
+        )
     return response
 
 
@@ -703,6 +731,28 @@ def fetch_all(query: str, params: tuple = ()) -> list[sqlite3.Row]:
     return get_db().execute(query, params).fetchall()
 
 
+def get_cached_user_payload(namespace: str, user_id: int, builder):
+    cache_key = f"{namespace}:{user_id}"
+    now_ts = time.monotonic()
+    with USER_PAYLOAD_CACHE_LOCK:
+        cached = USER_PAYLOAD_CACHE.get(cache_key)
+        if cached and now_ts - cached.get("cached_at", 0.0) < USER_PAYLOAD_CACHE_TTL_SECONDS:
+            return cached.get("value")
+
+    value = builder()
+    with USER_PAYLOAD_CACHE_LOCK:
+        USER_PAYLOAD_CACHE[cache_key] = {
+            "cached_at": now_ts,
+            "value": value,
+        }
+    return value
+
+
+def clear_user_payload_cache() -> None:
+    with USER_PAYLOAD_CACHE_LOCK:
+        USER_PAYLOAD_CACHE.clear()
+
+
 def load_authenticated_context() -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
     user_id = session.get("user_id")
     device_id = session.get("device_id")
@@ -1017,6 +1067,7 @@ def update_me():
     )
     get_db().commit()
     g.current_user = fetch_user_by_id(g.current_user["id"])
+    clear_user_payload_cache()
 
     return jsonify({"message": "Đã cập nhật hồ sơ.", "user": serialize_user(g.current_user)})
 
@@ -1082,9 +1133,9 @@ def clear_gemini_key():
 def current_family():
     return jsonify(
         {
-            "family": build_family_payload(g.current_user["id"]),
-            "invitations": list_pending_family_invitations(g.current_user["id"]),
-            "call_relationships": list_call_relationships(g.current_user["id"]),
+            "family": build_family_payload_cached(g.current_user["id"]),
+            "invitations": list_pending_family_invitations_cached(g.current_user["id"]),
+            "call_relationships": list_call_relationships_cached(g.current_user["id"]),
             "supported_relationships": build_supported_relationships_payload(),
         }
     )
@@ -1119,6 +1170,7 @@ def create_family():
         (family_group_id, g.current_user["id"], now, now),
     )
     db.commit()
+    clear_user_payload_cache()
 
     return jsonify({"message": "Đã tạo nhóm gia đình.", "family": build_family_payload(g.current_user["id"])})
 
@@ -1142,6 +1194,7 @@ def rename_family():
         (family_name, utcnow_iso(), membership["family_group_id"]),
     )
     get_db().commit()
+    clear_user_payload_cache()
 
     return jsonify({"message": "Đã cập nhật tên nhóm.", "family": build_family_payload(g.current_user["id"])})
 
@@ -1188,6 +1241,7 @@ def invite_to_family():
         (membership["family_group_id"], invited_user["id"], g.current_user["id"], now),
     )
     get_db().commit()
+    clear_user_payload_cache()
     invitation_id = fetch_one(
         "SELECT id FROM family_invitations WHERE family_group_id = ? AND invited_user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
         (membership["family_group_id"], invited_user["id"]),
@@ -1212,7 +1266,7 @@ def invite_to_family():
 @app.route("/api/families/invitations", methods=["GET"])
 @pin_required
 def family_invitations():
-    return jsonify({"invitations": list_pending_family_invitations(g.current_user["id"])})
+    return jsonify({"invitations": list_pending_family_invitations_cached(g.current_user["id"])})
 
 
 @app.route("/api/families/invitations/<int:invitation_id>/respond", methods=["POST"])
@@ -1254,6 +1308,7 @@ def respond_family_invitation(invitation_id: int):
             (now, invitation_id),
         )
         db.commit()
+        clear_user_payload_cache()
         send_push_notification(
             target_user_id=invitation["invited_by_user_id"],
             title="Loi moi da duoc chap nhan",
@@ -1272,6 +1327,7 @@ def respond_family_invitation(invitation_id: int):
         (utcnow_iso(), invitation_id),
     )
     get_db().commit()
+    clear_user_payload_cache()
     send_push_notification(
         target_user_id=invitation["invited_by_user_id"],
         title="Loi moi da bi tu choi",
@@ -1318,6 +1374,7 @@ def change_family_member_role(member_id: int):
         (new_role, utcnow_iso(), member_id),
     )
     get_db().commit()
+    clear_user_payload_cache()
 
     return jsonify({"message": "Đã cập nhật vai trò thành viên.", "family": build_family_payload(g.current_user["id"])})
 
@@ -1350,6 +1407,7 @@ def remove_family_member(member_id: int):
         (utcnow_iso(), member_id),
     )
     get_db().commit()
+    clear_user_payload_cache()
 
     message = "Bạn đã rời nhóm gia đình." if is_self else "Đã xóa thành viên khỏi nhóm."
     return jsonify({"message": message, "family": build_family_payload(g.current_user["id"])})
@@ -1367,6 +1425,7 @@ def leave_current_family():
     if active_member_count <= 1:
         get_db().execute("DELETE FROM family_groups WHERE id = ?", (family_group_id,))
         get_db().commit()
+        clear_user_payload_cache()
         return jsonify({"message": "Bạn đã rời và xóa nhóm gia đình cuối cùng.", "family": None})
 
     if membership["role"] == "admin" and count_active_admins(family_group_id) <= 1:
@@ -1381,6 +1440,7 @@ def leave_current_family():
         (utcnow_iso(), membership["membership_id"]),
     )
     get_db().commit()
+    clear_user_payload_cache()
     return jsonify({"message": "Bạn đã rời nhóm gia đình.", "family": None})
 
 
@@ -1395,6 +1455,7 @@ def dissolve_current_family():
 
     get_db().execute("DELETE FROM family_groups WHERE id = ?", (membership["family_group_id"],))
     get_db().commit()
+    clear_user_payload_cache()
     return jsonify({"message": "Đã giải tán nhóm gia đình.", "family": None})
 
 
@@ -1546,7 +1607,7 @@ def send_family_chat_message():
 def get_call_relationships():
     return jsonify(
         {
-            "relationships": list_call_relationships(g.current_user["id"]),
+            "relationships": list_call_relationships_cached(g.current_user["id"]),
             "supported_relationships": build_supported_relationships_payload(),
         }
     )
@@ -1618,6 +1679,7 @@ def upsert_call_relationship():
         )
 
     get_db().commit()
+    clear_user_payload_cache()
     return jsonify({"message": "Đã lưu quan hệ gọi khẩn cấp.", "relationships": list_call_relationships(g.current_user["id"])})
 
 
@@ -1636,6 +1698,7 @@ def delete_call_relationship(relationship_id: int):
         (utcnow_iso(), relationship_id),
     )
     get_db().commit()
+    clear_user_payload_cache()
     return jsonify({"message": "Đã xóa quan hệ gọi.", "relationships": list_call_relationships(g.current_user["id"])})
 
 
@@ -3678,6 +3741,14 @@ def build_family_payload(user_id: int) -> dict | None:
     }
 
 
+def build_family_payload_cached(user_id: int) -> dict | None:
+    return get_cached_user_payload(
+        "family_payload",
+        user_id,
+        lambda: build_family_payload(user_id),
+    )
+
+
 def list_pending_family_invitations(user_id: int) -> list[dict]:
     rows = fetch_all(
         """
@@ -3710,6 +3781,14 @@ def list_pending_family_invitations(user_id: int) -> list[dict]:
     ]
 
 
+def list_pending_family_invitations_cached(user_id: int) -> list[dict]:
+    return get_cached_user_payload(
+        "family_invitations",
+        user_id,
+        lambda: list_pending_family_invitations(user_id),
+    )
+
+
 def require_json() -> dict:
     return request.get_json(silent=True) or {}
 
@@ -3737,8 +3816,8 @@ def build_bootstrap_payload() -> dict:
         "pin_unlocked": (not pin_configured)
         or has_valid_pin_session_unlock(g.current_user["id"], g.current_device["device_id"])
         or validate_pin_token(pin_token, g.current_user["id"], g.current_device["device_id"]),
-        "family": build_family_payload(g.current_user["id"]),
-        "invitations": list_pending_family_invitations(g.current_user["id"]),
+        "family": build_family_payload_cached(g.current_user["id"]),
+        "invitations": list_pending_family_invitations_cached(g.current_user["id"]),
     }
 
 
@@ -5179,6 +5258,14 @@ def list_call_relationship_rows(owner_user_id: int) -> list[sqlite3.Row]:
 
 def list_call_relationships(owner_user_id: int) -> list[dict]:
     return [serialize_call_relationship(row) for row in list_call_relationship_rows(owner_user_id)]
+
+
+def list_call_relationships_cached(owner_user_id: int) -> list[dict]:
+    return get_cached_user_payload(
+        "call_relationships",
+        owner_user_id,
+        lambda: list_call_relationships(owner_user_id),
+    )
 
 
 def list_relationship_keys(owner_user_id: int) -> list[str]:
