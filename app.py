@@ -683,10 +683,17 @@ def pin_required(view_func):
             return json_error("Thiết bị này chưa thiết lập PIN 4 số.", 403, "pin_not_configured")
 
         pin_token = request.headers.get("X-PIN-Token", "").strip()
-        if not validate_pin_token(pin_token, g.current_user["id"], g.current_device["device_id"]):
+        pin_unlocked = validate_pin_token(pin_token, g.current_user["id"], g.current_device["device_id"])
+        if pin_unlocked:
+            mark_pin_session_unlocked(g.current_user["id"], g.current_device["device_id"])
+        else:
+            pin_unlocked = has_valid_pin_session_unlock(g.current_user["id"], g.current_device["device_id"])
+
+        if not pin_unlocked:
             log_mobile_diag("pin_required_blocked", level="warning", pin_token_present=bool(pin_token))
             return json_error("Bạn cần nhập PIN để mở khóa ứng dụng.", 403, "pin_required")
 
+        mark_pin_session_unlocked(g.current_user["id"], g.current_device["device_id"])
         mark_device_seen(g.current_device)
         return view_func(*args, **kwargs)
 
@@ -716,6 +723,7 @@ def pin_setup():
     )
     get_db().commit()
     g.current_device = fetch_device(g.current_user["id"], g.current_device["device_id"])
+    mark_pin_session_unlocked(g.current_user["id"], g.current_device["device_id"])
 
     return jsonify(
         {
@@ -782,6 +790,7 @@ def pin_verify():
         (now, now, g.current_device["id"]),
     )
     get_db().commit()
+    mark_pin_session_unlocked(g.current_user["id"], g.current_device["device_id"])
 
     return jsonify(
         {
@@ -3415,6 +3424,26 @@ def validate_pin_token(raw_token: str, user_id: int, device_id: str) -> bool:
     return payload.get("user_id") == user_id and payload.get("device_id") == device_id
 
 
+def mark_pin_session_unlocked(user_id: int, device_id: str) -> None:
+    session["pin_unlocked_user_id"] = user_id
+    session["pin_unlocked_device_id"] = device_id
+    session["pin_unlocked_at"] = utcnow_iso()
+
+
+def has_valid_pin_session_unlock(user_id: int, device_id: str) -> bool:
+    if session.get("pin_unlocked_user_id") != user_id:
+        return False
+    if session.get("pin_unlocked_device_id") != device_id:
+        return False
+
+    unlocked_at_raw = (session.get("pin_unlocked_at") or "").strip()
+    unlocked_at = parse_iso_datetime(unlocked_at_raw)
+    if unlocked_at is None:
+        return False
+
+    return unlocked_at + timedelta(seconds=PIN_TOKEN_MAX_AGE_SECONDS) > utcnow()
+
+
 def login_user_session(user_row: sqlite3.Row, device_id: str, device_name: str) -> sqlite3.Row:
     device = ensure_device_session(user_row["id"], device_id, device_name)
     session.clear()
@@ -3620,17 +3649,23 @@ def build_bootstrap_payload() -> dict:
             "authenticated": False,
             "user": None,
             "pin_configured": False,
+            "pin_unlocked": False,
             "family": None,
             "invitations": [],
         }
 
+    pin_configured = bool(g.current_device["pin_enabled"])
+    pin_token = request.headers.get("X-PIN-Token", "").strip()
     return {
         "authenticated": True,
         "user": {
             "id": g.current_user["id"],
             "full_name": g.current_user["full_name"],
         },
-        "pin_configured": bool(g.current_device["pin_enabled"]),
+        "pin_configured": pin_configured,
+        "pin_unlocked": (not pin_configured)
+        or has_valid_pin_session_unlock(g.current_user["id"], g.current_device["device_id"])
+        or validate_pin_token(pin_token, g.current_user["id"], g.current_device["device_id"]),
         "family": build_family_payload(g.current_user["id"]),
         "invitations": list_pending_family_invitations(g.current_user["id"]),
     }
