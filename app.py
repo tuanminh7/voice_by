@@ -571,6 +571,36 @@ def init_db() -> None:
 
     db = get_db()
     db.executescript(schema)
+    db.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_user_devices_lookup
+        ON user_devices(user_id, device_id, is_revoked);
+
+        CREATE INDEX IF NOT EXISTS idx_family_members_lookup
+        ON family_members(family_group_id, status, user_id);
+
+        CREATE INDEX IF NOT EXISTS idx_family_invitations_lookup
+        ON family_invitations(invited_user_id, status, created_at);
+
+        CREATE INDEX IF NOT EXISTS idx_family_relationships_lookup
+        ON family_relationships(owner_user_id, family_group_id, is_active, relationship_key, priority_order);
+
+        CREATE INDEX IF NOT EXISTS idx_device_push_tokens_lookup
+        ON device_push_tokens(user_id, is_active, updated_at);
+
+        CREATE INDEX IF NOT EXISTS idx_call_sessions_caller_history
+        ON call_sessions(caller_user_id, created_at, id);
+
+        CREATE INDEX IF NOT EXISTS idx_call_session_targets_call_lookup
+        ON call_session_targets(call_session_id, status, priority_order, id);
+
+        CREATE INDEX IF NOT EXISTS idx_call_session_targets_user_lookup
+        ON call_session_targets(target_user_id, call_session_id);
+
+        CREATE INDEX IF NOT EXISTS idx_family_chat_messages_lookup
+        ON family_chat_messages(family_group_id, sender_user_id, recipient_user_id, created_at);
+        """
+    )
     user_columns = {
         row["name"]
         for row in db.execute("PRAGMA table_info(users)").fetchall()
@@ -3380,6 +3410,16 @@ def fetch_user_by_id(user_id: int) -> sqlite3.Row | None:
     return fetch_one("SELECT * FROM users WHERE id = ?", (user_id,))
 
 
+def fetch_users_by_ids(user_ids: list[int] | set[int] | tuple[int, ...]) -> dict[int, sqlite3.Row]:
+    unique_ids = [int(user_id) for user_id in dict.fromkeys(user_ids) if int(user_id) > 0]
+    if not unique_ids:
+        return {}
+
+    placeholders = ", ".join("?" for _ in unique_ids)
+    rows = fetch_all(f"SELECT * FROM users WHERE id IN ({placeholders})", tuple(unique_ids))
+    return {int(row["id"]): row for row in rows}
+
+
 def fetch_user_by_email(email: str) -> sqlite3.Row | None:
     return fetch_one("SELECT * FROM users WHERE email = ?", (normalize_email(email),))
 
@@ -5244,6 +5284,33 @@ def fetch_call_targets(call_session_id: int) -> list[sqlite3.Row]:
     )
 
 
+def fetch_call_targets_for_sessions(call_session_ids: list[int] | set[int] | tuple[int, ...]) -> dict[int, list[sqlite3.Row]]:
+    unique_ids = [int(call_session_id) for call_session_id in dict.fromkeys(call_session_ids) if int(call_session_id) > 0]
+    if not unique_ids:
+        return {}
+
+    placeholders = ", ".join("?" for _ in unique_ids)
+    rows = fetch_all(
+        f"""
+        SELECT
+            cst.*,
+            u.full_name AS target_full_name,
+            u.email AS target_email,
+            u.phone_number AS target_phone_number
+        FROM call_session_targets cst
+        JOIN users u ON u.id = cst.target_user_id
+        WHERE cst.call_session_id IN ({placeholders})
+        ORDER BY cst.call_session_id ASC, cst.priority_order ASC, cst.id ASC
+        """,
+        tuple(unique_ids),
+    )
+
+    targets_by_session_id: dict[int, list[sqlite3.Row]] = {call_session_id: [] for call_session_id in unique_ids}
+    for row in rows:
+        targets_by_session_id[int(row["call_session_id"])].append(row)
+    return targets_by_session_id
+
+
 def fetch_current_ringing_target(call_session_id: int) -> sqlite3.Row | None:
     return fetch_one(
         """
@@ -5291,6 +5358,31 @@ def list_push_tokens_for_user(user_id: int) -> list[str]:
         (user_id,),
     )
     return [row["push_token"] for row in rows]
+
+
+def list_push_tokens_for_users(user_ids: list[int] | set[int] | tuple[int, ...]) -> dict[int, list[str]]:
+    unique_ids = [int(user_id) for user_id in dict.fromkeys(user_ids) if int(user_id) > 0]
+    if not unique_ids:
+        return {}
+
+    placeholders = ", ".join("?" for _ in unique_ids)
+    rows = fetch_all(
+        f"""
+        SELECT user_id, push_token
+        FROM device_push_tokens
+        WHERE user_id IN ({placeholders}) AND is_active = 1
+        ORDER BY updated_at DESC
+        """,
+        tuple(unique_ids),
+    )
+
+    tokens_by_user_id: dict[int, list[str]] = {user_id: [] for user_id in unique_ids}
+    for row in rows:
+        user_id = int(row["user_id"])
+        push_token = row["push_token"]
+        if push_token and push_token not in tokens_by_user_id[user_id]:
+            tokens_by_user_id[user_id].append(push_token)
+    return tokens_by_user_id
 
 
 def deactivate_push_tokens(push_tokens: list[str]) -> None:
@@ -5552,10 +5644,18 @@ def build_call_session_payload(call_session_id: int) -> dict | None:
     if not session_row:
         return None
 
-    caller = fetch_user_by_id(session_row["caller_user_id"])
-    accepted_by = fetch_user_by_id(session_row["accepted_by_user_id"]) if session_row["accepted_by_user_id"] else None
+    caller_user_id = int(session_row["caller_user_id"]) if session_row["caller_user_id"] else 0
+    accepted_by_user_id = int(session_row["accepted_by_user_id"]) if session_row["accepted_by_user_id"] else 0
+    users_by_id = fetch_users_by_ids(
+        [user_id for user_id in (caller_user_id, accepted_by_user_id) if user_id]
+    )
     targets = fetch_call_targets(call_session_id)
     current_target = next((target for target in targets if target["status"] == "ringing"), None)
+    push_tokens_by_user_id = list_push_tokens_for_users(
+        [int(current_target["target_user_id"])] if current_target else []
+    )
+    caller = users_by_id.get(caller_user_id)
+    accepted_by = users_by_id.get(accepted_by_user_id) if accepted_by_user_id else None
 
     return {
         "call_session_id": session_row["id"],
@@ -5579,7 +5679,7 @@ def build_call_session_payload(call_session_id: int) -> dict | None:
             "full_name": current_target["target_full_name"],
             "relationship_key": current_target["relationship_key"],
             "priority_order": current_target["priority_order"],
-            "push_tokens": list_push_tokens_for_user(current_target["target_user_id"]),
+            "push_tokens": push_tokens_by_user_id.get(int(current_target["target_user_id"]), []),
         } if current_target else None,
         "targets": [
             {
@@ -5617,7 +5717,93 @@ def list_call_history(user_id: int) -> list[dict]:
         """,
         (user_id, user_id),
     )
-    return [build_call_session_payload(row["id"]) for row in rows]
+    session_rows: list[sqlite3.Row] = []
+    for row in rows:
+        session_row = advance_call_session_if_needed(int(row["id"]))
+        if session_row is not None:
+            session_rows.append(session_row)
+
+    if not session_rows:
+        return []
+
+    session_ids = [int(row["id"]) for row in session_rows]
+    targets_by_session_id = fetch_call_targets_for_sessions(session_ids)
+
+    user_ids: set[int] = set()
+    current_target_user_ids: set[int] = set()
+    for session_row in session_rows:
+        if session_row["caller_user_id"]:
+            user_ids.add(int(session_row["caller_user_id"]))
+        if session_row["accepted_by_user_id"]:
+            user_ids.add(int(session_row["accepted_by_user_id"]))
+        for target_row in targets_by_session_id.get(int(session_row["id"]), []):
+            if target_row["status"] == "ringing":
+                current_target_user_ids.add(int(target_row["target_user_id"]))
+                break
+
+    users_by_id = fetch_users_by_ids(user_ids)
+    push_tokens_by_user_id = list_push_tokens_for_users(current_target_user_ids)
+
+    payloads: list[dict] = []
+    for session_row in session_rows:
+        caller = users_by_id.get(int(session_row["caller_user_id"])) if session_row["caller_user_id"] else None
+        accepted_by = (
+            users_by_id.get(int(session_row["accepted_by_user_id"]))
+            if session_row["accepted_by_user_id"]
+            else None
+        )
+        targets = targets_by_session_id.get(int(session_row["id"]), [])
+        current_target = next((target for target in targets if target["status"] == "ringing"), None)
+        payloads.append(
+            {
+                "call_session_id": session_row["id"],
+                "room_id": session_row["room_id"],
+                "provider": CALL_PROVIDER,
+                "status": session_row["status"],
+                "trigger_source": session_row["trigger_source"],
+                "relationship_key": session_row["relationship_key"],
+                "relationship_label": RELATIONSHIP_LABELS.get(session_row["relationship_key"], session_row["relationship_key"]),
+                "ring_timeout_seconds": CALL_RING_TIMEOUT_SECONDS,
+                "caller": {
+                    "id": caller["id"] if caller else None,
+                    "full_name": caller["full_name"] if caller else "NgÆ°á»i thÃ¢n",
+                },
+                "accepted_by": {
+                    "id": accepted_by["id"],
+                    "full_name": accepted_by["full_name"],
+                } if accepted_by else None,
+                "current_target": {
+                    "id": current_target["target_user_id"],
+                    "full_name": current_target["target_full_name"],
+                    "relationship_key": current_target["relationship_key"],
+                    "priority_order": current_target["priority_order"],
+                    "push_tokens": push_tokens_by_user_id.get(int(current_target["target_user_id"]), []),
+                } if current_target else None,
+                "targets": [
+                    {
+                        "target_user_id": target["target_user_id"],
+                        "full_name": target["target_full_name"],
+                        "relationship_key": target["relationship_key"],
+                        "priority_order": target["priority_order"],
+                        "status": target["status"],
+                        "rung_at": target["rung_at"],
+                        "responded_at": target["responded_at"],
+                        "response_reason": target["response_reason"],
+                    }
+                    for target in targets
+                ],
+                "transcript_text": session_row["transcript_text"],
+                "detected_intent": session_row["detected_intent"],
+                "started_at": session_row["started_at"],
+                "accepted_at": session_row["accepted_at"],
+                "ended_at": session_row["ended_at"],
+                "end_reason": session_row["end_reason"],
+                "created_at": session_row["created_at"],
+                "updated_at": session_row["updated_at"],
+            }
+        )
+
+    return payloads
 
 
 def get_call_target_candidates(
