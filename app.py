@@ -91,6 +91,13 @@ GEMINI_RUNTIME_STATUS = {
     "reason": "unverified",
     "checked_at": None,
 }
+GEMINI_DEBUG_MAX_ATTEMPTS = int(os.getenv("GEMINI_DEBUG_MAX_ATTEMPTS", "3"))
+EGRESS_IP_CACHE_TTL_SECONDS = int(os.getenv("EGRESS_IP_CACHE_TTL_SECONDS", "300"))
+EGRESS_IP_CACHE_LOCK = threading.Lock()
+EGRESS_IP_CACHE = {
+    "checked_at_monotonic": 0.0,
+    "value": None,
+}
 USER_PAYLOAD_CACHE_TTL_SECONDS = float(os.getenv("USER_PAYLOAD_CACHE_TTL_SECONDS", "2"))
 USER_PAYLOAD_CACHE: dict[str, dict] = {}
 USER_PAYLOAD_CACHE_LOCK = threading.Lock()
@@ -393,6 +400,153 @@ def build_chat_ai_capability_payload(user_row: sqlite3.Row | None = None) -> dic
 def build_capabilities_payload(user_row: sqlite3.Row | None = None) -> dict:
     return {
         "chat_ai": build_chat_ai_capability_payload(user_row),
+    }
+
+
+def get_public_egress_ip_info(*, force_refresh: bool = False) -> dict:
+    now_ts = time.monotonic()
+    with EGRESS_IP_CACHE_LOCK:
+        cached = EGRESS_IP_CACHE.get("value")
+        cached_at_monotonic = float(EGRESS_IP_CACHE.get("checked_at_monotonic") or 0.0)
+        if (
+            not force_refresh
+            and cached is not None
+            and now_ts - cached_at_monotonic < EGRESS_IP_CACHE_TTL_SECONDS
+        ):
+            return cached
+
+    checked_at = utcnow_iso()
+    sources = (
+        ("https://api.ipify.org?format=json", "json"),
+        ("https://ifconfig.me/ip", "text"),
+    )
+    last_error = None
+    for url, response_type in sources:
+        try:
+            with urllib_request.urlopen(url, timeout=3.0) as response:
+                raw_body = response.read().decode("utf-8", errors="replace").strip()
+            if response_type == "json":
+                payload = json.loads(raw_body or "{}")
+                ip_address = (payload.get("ip") or "").strip()
+            else:
+                ip_address = raw_body.strip()
+            if ip_address:
+                result = {
+                    "ip": ip_address,
+                    "source": url,
+                    "checked_at": checked_at,
+                    "error": None,
+                }
+                with EGRESS_IP_CACHE_LOCK:
+                    EGRESS_IP_CACHE["checked_at_monotonic"] = now_ts
+                    EGRESS_IP_CACHE["value"] = result
+                return result
+        except Exception as error:  # pragma: no cover - network-dependent
+            last_error = error
+
+    result = {
+        "ip": None,
+        "source": None,
+        "checked_at": checked_at,
+        "error": str(last_error) if last_error is not None else "unknown_error",
+    }
+    with EGRESS_IP_CACHE_LOCK:
+        EGRESS_IP_CACHE["checked_at_monotonic"] = now_ts
+        EGRESS_IP_CACHE["value"] = result
+    return result
+
+
+def run_gemini_health_check() -> dict:
+    if genai is None:
+        update_gemini_runtime_status(status="unavailable", reason="sdk_missing")
+        return {
+            "ok": False,
+            "provider": "gemini",
+            "reason": "sdk_missing",
+            "attempted_count": 0,
+            "attempts": [],
+            "error": "google-generativeai_not_installed",
+        }
+
+    api_keys = get_rotating_gemini_api_keys()
+    if not api_keys:
+        update_gemini_runtime_status(status="unavailable", reason="missing_server_key_pool")
+        return {
+            "ok": False,
+            "provider": "gemini",
+            "reason": "missing_server_key_pool",
+            "attempted_count": 0,
+            "attempts": [],
+            "error": "missing_server_key_pool",
+        }
+
+    attempts: list[dict] = []
+    max_attempts = max(1, min(len(api_keys), GEMINI_DEBUG_MAX_ATTEMPTS))
+    for api_key in api_keys[:max_attempts]:
+        key_preview = mask_secret(api_key)
+        current_model = build_gemini_model(api_key)
+        started_at = time.perf_counter()
+        try:
+            if current_model is None:
+                attempts.append(
+                    {
+                        "key_preview": key_preview,
+                        "ok": False,
+                        "reason": "model_not_built",
+                        "latency_ms": 0.0,
+                    }
+                )
+                continue
+            response = current_model.generate_content("Reply with exactly: OK")
+            reply = (getattr(response, "text", "") or "").strip()
+            latency_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            update_gemini_runtime_status(status="available", reason="ok")
+            attempts.append(
+                {
+                    "key_preview": key_preview,
+                    "ok": True,
+                    "reason": "ok",
+                    "latency_ms": latency_ms,
+                    "reply_preview": reply[:40],
+                }
+            )
+            return {
+                "ok": True,
+                "provider": "gemini",
+                "reason": "ok",
+                "attempted_count": len(attempts),
+                "attempts": attempts,
+                "model": MODEL_NAME,
+                "key_pool_size": len(api_keys),
+            }
+        except Exception as error:
+            latency_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            reason = get_gemini_error_reason(error)
+            attempts.append(
+                {
+                    "key_preview": key_preview,
+                    "ok": False,
+                    "reason": reason,
+                    "latency_ms": latency_ms,
+                    "error": str(error),
+                }
+            )
+            update_gemini_runtime_status(
+                status="blocked" if reason == "unsupported_location" else "degraded",
+                reason=reason,
+            )
+            if reason == "unsupported_location":
+                break
+
+    last_attempt = attempts[-1] if attempts else {}
+    return {
+        "ok": False,
+        "provider": "gemini",
+        "reason": last_attempt.get("reason") or "unknown_api_error",
+        "attempted_count": len(attempts),
+        "attempts": attempts,
+        "model": MODEL_NAME,
+        "key_pool_size": len(api_keys),
     }
 
 
@@ -3445,6 +3599,32 @@ def health():
 @app.route("/api/bootstrap")
 def bootstrap():
     return jsonify(build_bootstrap_payload())
+
+
+@app.route("/api/debug/gemini-health", methods=["GET"])
+@pin_required
+def debug_gemini_health():
+    force_refresh = (request.args.get("force") or "").strip().lower() in {"1", "true", "yes", "on"}
+    egress_ip = get_public_egress_ip_info(force_refresh=force_refresh)
+    health_check = run_gemini_health_check()
+    capability = build_chat_ai_capability_payload(g.current_user)
+    log_mobile_diag(
+        "gemini_health_checked",
+        egress_ip=egress_ip.get("ip"),
+        health_reason=health_check.get("reason"),
+        capability_status=capability.get("status"),
+        capability_reason=capability.get("reason"),
+        attempted_count=health_check.get("attempted_count"),
+        force_refresh=force_refresh,
+    )
+    return jsonify(
+        {
+            "server_time": utcnow_iso(),
+            "egress_ip": egress_ip,
+            "chat_ai": capability,
+            "gemini_health": health_check,
+        }
+    )
 
 
 @app.route("/api/auth/register", methods=["POST"])
