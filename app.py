@@ -286,6 +286,44 @@ def is_retryable_gemini_error(error: Exception) -> bool:
     return any(pattern in text for pattern in retryable_patterns)
 
 
+def get_gemini_error_reason(error: Exception | None) -> str:
+    if error is None:
+        return "empty_reply"
+
+    text = str(error).lower()
+    if "user location is not supported for the api use" in text:
+        return "unsupported_location"
+    if "location is not supported" in text or "region is not supported" in text:
+        return "unsupported_location"
+    if "unsupported country" in text:
+        return "unsupported_location"
+    if "failed_precondition" in text and "location" in text:
+        return "unsupported_location"
+    if is_retryable_gemini_error(error):
+        return "retryable_api_error"
+    return "unknown_api_error"
+
+
+def build_gemini_failure_message(error: Exception | None) -> str:
+    reason = get_gemini_error_reason(error)
+    if reason == "unsupported_location":
+        return (
+            "Dạ, máy chủ đang gọi Gemini từ khu vực chưa được API này hỗ trợ nên tôi chưa thể trả lời AI lúc này. "
+            "Bạn vẫn có thể dùng các chức năng khác của ứng dụng, hoặc thử lại sau khi đổi môi trường chạy backend sang khu vực được hỗ trợ nhé."
+        )
+    if reason == "retryable_api_error":
+        return (
+            "Dạ, kết nối đến trợ lý AI đang tạm thời quá tải hoặc bị gián đoạn. "
+            "Bạn thử lại sau ít phút giúp mình nhé."
+        )
+    if error is None:
+        return "Dạ, tôi chưa tạo được câu trả lời phù hợp. Bạn thử hỏi lại một chút nhé."
+    return (
+        "Dạ, trong lúc kết nối trợ lý AI đã có lỗi xảy ra. "
+        "Bạn thử lại sau ít phút giúp mình nhé."
+    )
+
+
 def get_gemini_unavailable_reason(user_row: sqlite3.Row | None) -> str:
     if genai is None:
         return "sdk_missing"
@@ -2332,11 +2370,8 @@ def chat_stream():
                     continue
                 full_text += chunk_text
                 yield chunk_text
-        except Exception:
-            full_text = (
-                "Dạ, trong lúc kết nối Gemini đã có lỗi xảy ra. "
-                "Bạn thử lại sau ít phút hoặc kiểm tra API key giúp tôi nhé."
-            )
+        except Exception as error:
+            full_text = build_gemini_failure_message(error)
             yield full_text
 
         if not full_text.strip():
@@ -3189,16 +3224,12 @@ def generate_reply(question: str, history: list[str]) -> str:
         level="error",
         question_preview=question[:120],
         history_size=len(history),
+        error_reason=get_gemini_error_reason(last_error),
         error=str(last_error) if last_error is not None else "empty_reply",
         attempted_key_count=len(api_keys),
         **build_gemini_diag_context(g.current_user),
     )
-    reply = (
-        "Dạ, trong lúc kết nối trợ lý đã có lỗi xảy ra. "
-        "Bạn thử lại sau ít phút giúp mình nhé."
-    )
-    if last_error is None:
-        reply = "Dạ, tôi chưa tạo được câu trả lời phù hợp. Bạn thử hỏi lại một chút nhé."
+    reply = build_gemini_failure_message(last_error)
 
     remember_turn(history, question, reply)
     return reply
