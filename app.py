@@ -85,6 +85,12 @@ GEMINI_GENERATION_CONFIG = {
 }
 GEMINI_KEY_CURSOR = 0
 GEMINI_KEY_CURSOR_LOCK = threading.Lock()
+GEMINI_RUNTIME_STATUS_LOCK = threading.Lock()
+GEMINI_RUNTIME_STATUS = {
+    "status": "unknown",
+    "reason": "unverified",
+    "checked_at": None,
+}
 USER_PAYLOAD_CACHE_TTL_SECONDS = float(os.getenv("USER_PAYLOAD_CACHE_TTL_SECONDS", "2"))
 USER_PAYLOAD_CACHE: dict[str, dict] = {}
 USER_PAYLOAD_CACHE_LOCK = threading.Lock()
@@ -327,6 +333,67 @@ def build_gemini_failure_message(error: Exception | None) -> str:
         "Dạ, trong lúc kết nối trợ lý AI đã có lỗi xảy ra. "
         "Bạn thử lại sau ít phút giúp mình nhé."
     )
+
+
+def update_gemini_runtime_status(*, status: str, reason: str) -> None:
+    with GEMINI_RUNTIME_STATUS_LOCK:
+        GEMINI_RUNTIME_STATUS["status"] = status
+        GEMINI_RUNTIME_STATUS["reason"] = reason
+        GEMINI_RUNTIME_STATUS["checked_at"] = utcnow_iso()
+
+
+def build_chat_ai_capability_payload(user_row: sqlite3.Row | None = None) -> dict:
+    if genai is None:
+        return {
+            "provider": "gemini",
+            "available": False,
+            "status": "unavailable",
+            "reason": "sdk_missing",
+            "checked_at": None,
+        }
+
+    if user_row is None:
+        return {
+            "provider": "gemini",
+            "available": False,
+            "status": "unavailable",
+            "reason": "missing_authenticated_user",
+            "checked_at": None,
+        }
+
+    if not has_server_gemini_key_pool():
+        return {
+            "provider": "gemini",
+            "available": False,
+            "status": "unavailable",
+            "reason": "missing_server_key_pool",
+            "checked_at": None,
+        }
+
+    with GEMINI_RUNTIME_STATUS_LOCK:
+        runtime_status = dict(GEMINI_RUNTIME_STATUS)
+
+    status = runtime_status.get("status") or "unknown"
+    reason = runtime_status.get("reason") or "unverified"
+    checked_at = runtime_status.get("checked_at")
+    available = status == "available"
+
+    if status == "unknown":
+        status = "configured"
+
+    return {
+        "provider": "gemini",
+        "available": available,
+        "status": status,
+        "reason": reason,
+        "checked_at": checked_at,
+    }
+
+
+def build_capabilities_payload(user_row: sqlite3.Row | None = None) -> dict:
+    return {
+        "chat_ai": build_chat_ai_capability_payload(user_row),
+    }
 
 
 def get_gemini_unavailable_reason(user_row: sqlite3.Row | None) -> str:
@@ -1018,6 +1085,7 @@ def me():
             "invitations": list_pending_family_invitations(g.current_user["id"]),
             "call_relationships": list_call_relationships(g.current_user["id"]),
             "supported_relationships": build_supported_relationships_payload(),
+            "capabilities": build_capabilities_payload(g.current_user),
         }
     )
 
@@ -2457,6 +2525,7 @@ def chat_stream():
 
         try:
             response = current_model.generate_content(prompt, stream=True)
+            update_gemini_runtime_status(status="available", reason="ok")
             for chunk in response:
                 chunk_text = getattr(chunk, "text", "")
                 if not chunk_text:
@@ -2464,6 +2533,11 @@ def chat_stream():
                 full_text += chunk_text
                 yield chunk_text
         except Exception as error:
+            failure_reason = get_gemini_error_reason(error)
+            update_gemini_runtime_status(
+                status="blocked" if failure_reason == "unsupported_location" else "degraded",
+                reason=failure_reason,
+            )
             full_text = build_gemini_failure_message(error)
             yield full_text
 
@@ -3236,16 +3310,19 @@ def build_unavailable_message(user_row: sqlite3.Row | None = None) -> str:
         **build_gemini_diag_context(user_row),
     )
     if genai is None:
+        update_gemini_runtime_status(status="unavailable", reason="sdk_missing")
         return (
             "Dạ, ứng dụng chưa cài thư viện google-generativeai nên tôi chưa thể kết nối Gemini. "
             "Bạn hãy cài dependencies rồi thử lại nhé."
         )
 
     if not has_server_gemini_key_pool():
+        update_gemini_runtime_status(status="unavailable", reason="missing_server_key_pool")
         return (
             "Dạ, hệ thống chưa được cấu hình Gemini API key trên server nên tôi chưa thể trả lời AI."
         )
 
+    update_gemini_runtime_status(status="degraded", reason="unknown")
     return "Dạ, hiện tôi chưa sẵn sàng để phản hồi. Bạn thử lại giúp tôi nhé."
 
 
@@ -3285,6 +3362,7 @@ def generate_reply(question: str, history: list[str]) -> str:
             response = current_model.generate_content(prompt)
             reply = (getattr(response, "text", "") or "").strip()
             if reply:
+                update_gemini_runtime_status(status="available", reason="ok")
                 if should_expand_assistant_reply(question, reply):
                     expanded_reply = expand_assistant_reply(
                         question,
@@ -3321,6 +3399,11 @@ def generate_reply(question: str, history: list[str]) -> str:
         error=str(last_error) if last_error is not None else "empty_reply",
         attempted_key_count=len(api_keys),
         **build_gemini_diag_context(g.current_user),
+    )
+    failure_reason = get_gemini_error_reason(last_error)
+    update_gemini_runtime_status(
+        status="blocked" if failure_reason == "unsupported_location" else "degraded",
+        reason=failure_reason,
     )
     reply = build_gemini_failure_message(last_error)
 
@@ -3800,6 +3883,7 @@ def build_bootstrap_payload() -> dict:
             "user": None,
             "pin_configured": False,
             "pin_unlocked": False,
+            "capabilities": build_capabilities_payload(None),
             "family": None,
             "invitations": [],
         }
@@ -3816,6 +3900,7 @@ def build_bootstrap_payload() -> dict:
         "pin_unlocked": (not pin_configured)
         or has_valid_pin_session_unlock(g.current_user["id"], g.current_device["device_id"])
         or validate_pin_token(pin_token, g.current_user["id"], g.current_device["device_id"]),
+        "capabilities": build_capabilities_payload(g.current_user),
         "family": build_family_payload_cached(g.current_user["id"]),
         "invitations": list_pending_family_invitations_cached(g.current_user["id"]),
     }
